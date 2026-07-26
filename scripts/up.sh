@@ -7,6 +7,10 @@ SCRIPTS="$(dirname "${BASH_SOURCE[0]}")"
 
 require_macos
 load_config
+# Secrets are loaded here rather than inside load_config on purpose: only this
+# script needs them, and the unit tests call load_config with a throwaway
+# lab.conf -- they must never pull in the operator's real .env as a side effect.
+load_env
 
 MODE="all"
 case "${1:-}" in
@@ -19,12 +23,29 @@ esac
 run_ansible() {
   log "Installing Ansible Galaxy requirements"
   ansible-galaxy collection install -r "${ANSIBLE_DIR}/requirements.yaml" >/dev/null
+
+  # Secrets from .env go to Ansible through a 0600 file, never through
+  # -e key=value: command-line arguments are visible to every user on the host in
+  # `ps auxww`, so a password passed that way is public for the length of the run.
+  # Non-secret configuration stays in group_vars and the generated inventory.
+  local vars_file="" secrets
+  secrets="$(render_secret_vars)"
+  if [[ -n "$secrets" ]]; then
+    vars_file="$(mktemp)"
+    chmod 600 "$vars_file"
+    # Bake the path into the trap so the file is removed even if ansible-playbook
+    # fails under set -e.
+    trap "rm -f '${vars_file}'" EXIT
+    printf '%s\n' "$secrets" > "$vars_file"
+    log "Passing $(grep -c ':' "$vars_file") secret(s) from .env via a 0600 vars file"
+  fi
+
   log "Running Ansible playbook"
-  # No -e vars in Phase 1: everything the plays need comes from the generated
-  # inventory and ansible/group_vars. Phase 2 adds the VPN provider selection;
-  # any secret must go through a 0600 vars file, never -e on the command line
-  # (that would put it in the host process list, ps auxww).
-  ( cd "$REPO_ROOT" && ansible-playbook "${ANSIBLE_DIR}/playbook.yaml" )
+  if [[ -n "$vars_file" ]]; then
+    ( cd "$REPO_ROOT" && ansible-playbook "${ANSIBLE_DIR}/playbook.yaml" -e "@${vars_file}" )
+  else
+    ( cd "$REPO_ROOT" && ansible-playbook "${ANSIBLE_DIR}/playbook.yaml" )
+  fi
   ok "Configuration complete"
 }
 

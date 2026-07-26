@@ -60,6 +60,7 @@ test: ## Run the shell unit tests (no UTM needed)
 	@bash tests/seed-network.sh
 	@bash tests/gen-inventory.sh
 	@bash tests/ssh-jump.sh
+	@bash tests/secret-vars.sh
 
 lint: ## Syntax-check scripts and Ansible
 	@bash -n scripts/*.sh tests/*.sh && echo "shell OK"

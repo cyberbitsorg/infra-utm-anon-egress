@@ -10,8 +10,12 @@ cloud-init/*.rendered.yaml
 # Ansible inventory generated from running VMs
 ansible/inventory/hosts.generated.yaml
 
-# Secrets and local config
+# Secrets and local config. The .example files ARE tracked; the real ones never
+# are. Belt and braces on .env: ignore every .env* variant, then re-include the
+# example, so a .env.local or .env.bak cannot be committed by accident either.
 lab.conf
+.env*
+!.env.example
 *.pem
 id_ed25519
 id_ed25519.pub

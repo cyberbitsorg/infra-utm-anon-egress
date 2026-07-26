@@ -1,0 +1,10 @@
+---
+# Console/GUI password for the gateway user. Empty = leave the account locked as
+# cloud-init created it, so the UTM console shows boot output but accepts no login.
+#
+# Do NOT put a real value here: this file is tracked in git. The value comes from
+# GATEWAY_CONSOLE_PASSWORD in .env (gitignored, mode 0600), handed to Ansible
+# through a 0600 vars file by scripts/up.sh. `make preflight` generates one.
+#
+# SSH is key-only regardless of this setting.
+gateway_console_password: ""

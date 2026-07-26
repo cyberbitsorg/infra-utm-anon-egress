@@ -67,7 +67,8 @@ from the generated inventory.
 
 ```bash
 cp lab.conf.example lab.conf   # adjust if you want other names/sizes
-make up                        # preflight, images, VMs, cloud-init, Ansible
+make preflight                 # checks tools; generates the SSH key and .env
+make up                        # images, VMs, cloud-init, Ansible
 make verify                    # assert the isolation property
 make ssh gateway               # direct, over the host port forward
 make ssh workstation           # via ProxyJump through the gateway
@@ -93,6 +94,27 @@ make lint        # bash -n on scripts, ansible-lint if present
 make down        # stop VMs
 make destroy     # delete VMs and generated artifacts
 ```
+
+## Configuration and secrets
+
+Two files, both gitignored, each with a tracked `.example`. It is the same split
+as `*.tf` versus `terraform.tfvars` in the sibling Hetzner repos:
+
+| File | Holds | Why separate |
+|------|-------|--------------|
+| `lab.conf` | fleet, image URLs, sizes, segment | build configuration you could paste into an issue to reproduce a fleet |
+| `.env` | console passwords, and Phase 2's VPN credentials | the one file that must never leave this machine; kept at mode `0600` |
+
+`make preflight` creates both a fresh SSH key and a `.env` if they are missing,
+generating a **distinct 24-character password per VM** and writing the file `0600`
+before any secret goes into it. Nothing is overwritten if it already exists, so
+your own values are safe. Read them back with `grep CONSOLE_PASSWORD .env`.
+
+Everything in `.env` is optional: an unset value means "do not configure that
+feature", never a broken build. Secrets reach Ansible through a `0600` temp vars
+file, never `-e key=value` — command-line arguments are visible to every user on
+the host in `ps auxww`. The `group_vars` defaults stay empty strings on purpose,
+since those files *are* tracked.
 
 ## Fleet layout
 
@@ -168,11 +190,12 @@ make console workstation
 
 - The pty path (`/dev/ttysNNN`) is assigned by UTM at VM start and **changes on
   every boot**, which is why `make console` queries it live rather than hardcoding it.
-- `cloud-init` sets `lock_passwd: true`, so by default the login prompt cannot be
-  passed: it is a **diagnostic** channel (boot messages, cloud-init failures), not
-  a way in. Set `workstation_console_password` to make it a real recovery path —
-  worth considering, since the workstation has no host port forward and the
-  console is its only access if the gateway ever fails. SSH stays key-only either way.
+- `cloud-init` sets `lock_passwd: true`, which would leave the console able to
+  show boot output but not accept a login. The console passwords in `.env` unlock
+  it (`chpasswd` on the guest, so no crypt/passlib needed on the control node), so
+  the console is a real recovery path — which matters most for the workstation,
+  whose only other access is through the gateway. **SSH stays key-only on both**
+  (`passwordauthentication no`); these passwords are console/GUI only.
 - The role also removes the Kali image's agetty **auto-login drop-ins**, which
   would otherwise hand anyone opening the console a root shell with no
   authentication. That needs no egress, so it applies from Phase 1 on.

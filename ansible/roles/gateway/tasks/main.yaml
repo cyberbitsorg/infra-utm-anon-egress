@@ -20,3 +20,18 @@
     sysctl_set: true
     state: present
     reload: true
+
+- name: Set the gateway's console password
+  # cloud-init locks the user's password, so without this the UTM console can
+  # show boot output but not accept a login. Set on the guest so we do not depend
+  # on the control node's crypt/passlib; chpasswd also unlocks the account.
+  # Console/GUI only -- SSH stays key-only (ssh_pwauth: false).
+  #
+  # Comes from GATEWAY_CONSOLE_PASSWORD in .env via a 0600 vars file (see
+  # render_secret_vars in scripts/lib.sh). Unset means "leave it locked", which is
+  # why the group_vars default is an empty string rather than a value.
+  ansible.builtin.shell:
+    cmd: "echo '{{ ansible_user }}:{{ gateway_console_password }}' | chpasswd"
+  changed_when: false
+  no_log: true
+  when: (gateway_console_password | default('')) | length > 0

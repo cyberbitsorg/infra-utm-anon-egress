@@ -55,6 +55,72 @@ load_config() {
   LAB_SSH_KEY="${LAB_SSH_KEY/#\$\{HOME\}/$HOME}"
 }
 
+# --- Secrets ----------------------------------------------------------------
+# Secrets live in .env, NOT in lab.conf. The split is deliberate: lab.conf is
+# build configuration you might paste into an issue (fleet, image URLs, sizes),
+# while .env holds only things that must never leave this machine -- console
+# passwords now, VPN credentials in Phase 2. Both are gitignored; only the
+# .example files are tracked.
+ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env}"
+
+# Source .env if it exists. Absent is fine: every secret is optional, and an
+# unset one means "do not configure that feature" rather than a broken build.
+load_env() {
+  [[ -f "$ENV_FILE" ]] || return 0
+  local perms
+  # Secrets must not be world- or group-readable. Warn rather than die: refusing
+  # to build over a file mode would be worse than telling the operator.
+  perms="$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo '')"
+  case "$perms" in
+    600|400) ;;
+    "") ;;
+    *) warn "${ENV_FILE} is mode ${perms}; secrets should be 600. Fix with: chmod 600 ${ENV_FILE}" ;;
+  esac
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+}
+
+# Emit the secrets from .env as an Ansible vars document on stdout.
+#
+# Ansible gets these through `-e @file` with the file at 0600, never through
+# `-e key=value`: command-line arguments are visible to every user on the host in
+# `ps auxww`, so a password passed that way is effectively public while the
+# playbook runs.
+#
+# Values are written as single-quoted YAML scalars with every ' doubled, which is
+# how YAML escapes a quote inside one. That keeps a password containing quotes,
+# backslashes, '#', '$' or a leading space completely literal -- tests/secret-vars.sh
+# round-trips a deliberately hostile one through a real YAML parser.
+#
+# An unset or empty secret is OMITTED rather than emitted empty, so the roles'
+# group_vars defaults keep deciding what "no password" means.
+render_secret_vars() {
+  local name val esc
+  for name in GATEWAY_CONSOLE_PASSWORD WORKSTATION_CONSOLE_PASSWORD; do
+    eval "val=\${${name}:-}"
+    [[ -n "$val" ]] || continue
+    # UNQUOTED assignment on purpose: it makes \' a literal ' in both pattern and
+    # replacement, doubling each quote. Wrapping this in double quotes instead
+    # (esc="${val//\'/\'\'}") emits backslash-escaped quotes -- which YAML does
+    # not accept inside a single-quoted scalar -- and produces a file
+    # ansible-playbook rejects. tests/secret-vars.sh catches that regression.
+    # shellcheck disable=SC2086
+    esc=${val//\'/\'\'}
+    # Lowercase the env var name to get the Ansible var name.
+    printf "%s: '%s'\n" "$(printf '%s' "$name" | tr 'A-Z' 'a-z')" "$esc"
+  done
+}
+
+# Generate a password: 24 chars from [A-Za-z0-9] (~142 bits). The charset is
+# restricted on purpose -- it is wide enough to be strong, and narrow enough that
+# the value can never trip a shell, a YAML parser or chpasswd on its way to the
+# guest.
+gen_password() {
+  openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c1-24
+}
+
 # Full UTM VM name for a short name (e.g. gateway -> anon-gateway).
 vm_name() { echo "${LAB_PREFIX}-$1"; }
 
