@@ -11,6 +11,29 @@
   hosts: all
   become: true
   gather_facts: true
+  pre_tasks:
+    # sshd answers long before cloud-init has finished, so 'make up' would
+    # otherwise start configuring a host whose first boot is still in progress.
+    # That is not theoretical: cloud-init's own `apt update` raced this role's
+    # apt task and made a package that exists ("dnsutils") momentarily
+    # unresolvable, failing the whole build. Waiting here rather than in up.sh
+    # covers 'make configure' as well.
+    - name: Wait for cloud-init to finish first boot
+      ansible.builtin.command: cloud-init status --wait
+      register: anon_cloud_init
+      changed_when: false
+      # 0 = done. 2 = done, but some module reported a recoverable error, which
+      # is worth surfacing rather than either ignoring or failing the build on.
+      # Anything else is a genuine failure.
+      failed_when: anon_cloud_init.rc not in [0, 2]
+
+    - name: Report a degraded cloud-init
+      ansible.builtin.debug:
+        msg: >-
+          cloud-init finished with recoverable errors on {{ inventory_hostname }}.
+          Check /var/log/cloud-init.log -- something in the seed did not apply.
+      when: anon_cloud_init.rc == 2
+
   roles:
     - role: common
       tags: [common, base]

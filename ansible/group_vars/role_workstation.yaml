@@ -9,3 +9,23 @@
 # then installs the Kali toolset and Mullvad Browser here. At that point fill this
 # list (or drop the file to inherit group_vars/all.yaml).
 common_packages: []
+
+# --- Egress-dependent features ----------------------------------------------
+# Both default to off because this host has no route off the internal segment in
+# Phase 1. Flip them together once Phase 2's gateway forwards traffic through the
+# VPN tunnel -- at which point Kali's kernel and desktop are downloaded through
+# the tunnel rather than over your real IP, which is the whole point of doing it
+# in that order.
+#
+# workstation_has_egress is the honest statement of fact ("the gateway forwards
+# this host's traffic now"); workstation_console_kernel is the feature that needs
+# it. Keeping them separate means enabling the feature too early fails with a
+# clear message instead of an apt timeout.
+workstation_has_egress: false
+workstation_console_kernel: false
+
+# Console/GUI password for the workstation user. Empty = leave the account locked
+# as cloud-init created it, so the console is diagnostic only (you can read boot
+# and cloud-init output, but not log in). A desktop greeter needs this set.
+# SSH is key-only regardless. Prefer a vault over a plaintext value here.
+workstation_console_password: ""

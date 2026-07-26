@@ -118,29 +118,64 @@ The gateway must stay the **first** fleet entry: its host SSH port is
 `2300 + index` (`ssh_port_for`), and both the workstation's ProxyJump and `scripts/verify.sh`
 derive that port from index 1.
 
-## The UTM display says "Display output is not active"
+## Consoles and the UTM display
 
-That is expected and permanent. Both base images run the distro's **`-cloud`
-kernel flavour**, which is built with no DRM drivers at all — no virtio-gpu, no
-framebuffer. The guest sees UTM's display device (`lspci` shows the Virtio GPU)
-but nothing ever binds to it, so the display view stays dark no matter what.
+A distro's **`-cloud` kernel flavour is built with no DRM drivers at all** — no
+virtio-gpu, no framebuffer. A guest running one sees UTM's display device
+(`lspci` shows the Virtio GPU) but nothing binds to it, so UTM reports "Display
+output is not active" forever. That single fact drives the setup here:
 
-The console that works is the **serial** one: the guests put their kernel console
-and a getty on `ttyAMA0`, and UTM exposes it to the host as a pseudo-tty.
+| VM | Display in UTM | How |
+|----|----------------|-----|
+| `gateway` | **works** | Debian's `generic` image ships the standard `linux-image-arm64` kernel, which has `virtio_gpu`. Nothing to install. |
+| `workstation` | dead until Phase 2 | Kali publishes **only** the `genericcloud` variant, so the kernel must be swapped from Ansible — which needs apt, which needs egress the workstation does not have yet. |
+
+Verify it on the gateway with `ls /sys/class/drm` (expect `card0`) and
+`cat /sys/class/graphics/fb0/name` (expect `virtio_gpudrmfb`).
+
+### The Kali display, and why it waits
+
+The `workstation` role already contains the fix — install `linux-image-arm64`,
+point grub at it with `GRUB_DEFAULT=saved`, reboot — ported from the sibling
+lab's `attacker` role along with its two hard-won details: grub sorts the `cloud`
+flavour *ahead* of the plain one at the same version, and purging the cloud
+kernel wedges the boot, so it stays installed as a fallback.
+
+It is gated off, in `ansible/group_vars/role_workstation.yaml`:
+
+```yaml
+workstation_has_egress: false      # the gateway forwards this host's traffic
+workstation_console_kernel: false  # the feature that needs it
+```
+
+Flip both once Phase 2's tunnel is up. Doing it in that order is deliberate:
+Kali's kernel and desktop then download **through the tunnel** rather than over
+your real IP. Enabling the feature without the egress flag fails immediately with
+an explanatory message instead of an apt timeout.
+
+A desktop (Phase 3's Mullvad Browser needs one) depends on this block having run:
+an XFCE greeter has nothing to draw on under the cloud kernel.
+
+### Serial console (works on both, any kernel)
+
+Both guests put their kernel console and a getty on `ttyAMA0`, and UTM exposes it
+to the host as a pseudo-tty. This is the only console the workstation has today:
 
 ```bash
 make console gateway        # attaches with screen; detach: Ctrl-a k, then y
 make console workstation
 ```
 
-Two things worth knowing:
-
 - The pty path (`/dev/ttysNNN`) is assigned by UTM at VM start and **changes on
-  every boot**, which is why `make console` queries it live instead of hardcoding it.
-- `cloud-init` sets `lock_passwd: true`, so the login prompt on that console
-  cannot be passed. It is a **diagnostic** channel — boot messages, cloud-init
-  failures — not a way in, and not a recovery path. If you want it to be one, set
-  a console password deliberately (SSH stays key-only either way).
+  every boot**, which is why `make console` queries it live rather than hardcoding it.
+- `cloud-init` sets `lock_passwd: true`, so by default the login prompt cannot be
+  passed: it is a **diagnostic** channel (boot messages, cloud-init failures), not
+  a way in. Set `workstation_console_password` to make it a real recovery path —
+  worth considering, since the workstation has no host port forward and the
+  console is its only access if the gateway ever fails. SSH stays key-only either way.
+- The role also removes the Kali image's agetty **auto-login drop-ins**, which
+  would otherwise hand anyone opening the console a root shell with no
+  authentication. That needs no egress, so it applies from Phase 1 on.
 
 If you would rather have the console *inside* the UTM window, switch the VM's
 serial device to "Built-in Terminal" in UTM (Edit → Serial, VM stopped). That

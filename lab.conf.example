@@ -41,12 +41,22 @@ LAB_RAM=2048
 LAB_DISK_GB=20
 
 # --- Base images (ARM64 / aarch64) ------------------------------------------
-# The gateway runs Debian genericcloud (small, stable router); the workstation
-# runs Kali. The base image is chosen per role (see scripts/lib.sh role_image).
+# The gateway runs Debian (small, stable router); the workstation runs Kali. The
+# base image is chosen per role (see scripts/lib.sh role_image).
+#
+# NOTE: this is Debian's "generic" variant, NOT "genericcloud". They differ in
+# exactly one way that matters here: genericcloud ships the cut-down
+# linux-image-cloud-arm64 kernel, which is built with no DRM drivers at all, so
+# nothing binds to UTM's virtio-gpu device and UTM's display view is permanently
+# dead ("Display output is not active"). "generic" ships the standard
+# linux-image-arm64 kernel, which has virtio_gpu, so the gateway has a working
+# UTM console from first boot with no post-install grub surgery. It costs a
+# couple hundred MB more to download. Kali publishes no equivalent, which is why
+# the workstation instead swaps its kernel from Ansible (see the workstation role).
 #
 # Debian publishes SHA512SUMS (not SHA256SUMS) next to its cloud images, so
 # DEBIAN_SHA_ALGO tells fetch-images.sh which digest to verify with.
-DEBIAN_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2"
+DEBIAN_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-arm64.qcow2"
 DEBIAN_SHA_URL="https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS"
 DEBIAN_SHA_ALGO=512
 

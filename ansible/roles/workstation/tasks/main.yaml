@@ -1,11 +1,11 @@
 ---
-# Phase 1 stub. The real content -- the Kali toolset and Mullvad Browser for
-# application-layer fingerprint defense -- lands in Phase 3, once the gateway
-# actually provides egress. See docs/superpowers/plans/.
+# Phase 1 content is the marker file. The Kali toolset and Mullvad Browser land
+# in Phase 3, once the gateway actually provides egress. See docs/superpowers/.
 #
-# Everything here must work with NO route off the internal segment: in Phase 1
-# this host cannot reach a package mirror at all, by design. Nothing in this file
-# may touch the network.
+# EVERYTHING here that touches the network must stay behind
+# workstation_console_kernel (or a later equivalent flag): in Phase 1 this host
+# has no route to a package mirror at all, by design, and that is the milestone
+# rather than a defect.
 - name: Mark workstation provisioned (Phase 1)
   ansible.builtin.copy:
     dest: /etc/anon-egress-role
@@ -13,3 +13,100 @@
     owner: root
     group: root
     mode: "0644"
+
+# --- UTM console (needs egress; off until Phase 2) --------------------------
+#
+# Kali publishes only the "genericcloud" cloud image, whose
+# linux-image-cloud-arm64 kernel is built with NO DRM drivers: the guest sees
+# UTM's virtio-gpu-pci device but nothing binds to it, so UTM's display view
+# reports "Display output is not active" forever. The gateway dodges this by
+# using Debian's "generic" image instead; Kali has no such variant, so the only
+# fix is to install the standard kernel and boot it.
+#
+# This mirrors the proven implementation in the sibling infra-utm-redteam-lab
+# attacker role, including its two hard-won details (see below). It is also the
+# prerequisite for a desktop: an XFCE greeter needs a framebuffer, so Phase 3's
+# Mullvad Browser work depends on this block having run.
+- name: Fail clearly if the console kernel is enabled without egress
+  # apt here would otherwise fail deep in a mirror timeout, which reads as a
+  # broken playbook rather than "you enabled this one phase too early".
+  ansible.builtin.fail:
+    msg: >-
+      workstation_console_kernel is enabled but this host cannot reach a package
+      mirror. It has no NAT NIC by design; the gateway must forward its traffic
+      first (Phase 2: VPN + kill-switch). Turn this back off, or finish Phase 2.
+  when:
+    - workstation_console_kernel | default(false) | bool
+    - not workstation_has_egress | default(false) | bool
+
+- name: Install the standard Kali kernel (includes virtio_gpu for the console)
+  ansible.builtin.apt:
+    name: linux-image-arm64
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when:
+    - workstation_console_kernel | default(false) | bool
+    - workstation_has_egress | default(false) | bool
+    - ansible_distribution == 'Kali'
+  notify: Reboot into the standard kernel
+
+- name: Make grub default to the standard (non-cloud) kernel
+  # Read the real menuentry ids out of the generated grub.cfg rather than
+  # guessing a version or UUID, and pin them with GRUB_DEFAULT=saved: grub sorts
+  # the "cloud" flavour ahead of the plain one at the same version, so without
+  # this the driver-less cloud kernel keeps winning.
+  #
+  # IMPORTANT: the cloud kernel stays installed as a fallback. The sibling lab
+  # found that purging it wedged the boot (grub picked a half-removed entry and
+  # the guest hung). Only grub's default changes here.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    update-grub
+    sub="$(awk -F"'" '/^submenu / {print $4; exit}' /boot/grub/grub.cfg)"
+    entry="$(awk -F"'" '/[[:space:]]menuentry / && /gnulinux/ && /kali-arm64/ && !/cloud/ && !/recovery/ {print $4; exit}' /boot/grub/grub.cfg)"
+    [ -n "$entry" ] || { echo "no standard-kernel grub entry found"; exit 1; }
+    if ! grep -q '^GRUB_DEFAULT=saved' /etc/default/grub; then
+      sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
+      grep -q '^GRUB_DEFAULT=' /etc/default/grub || echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
+    fi
+    update-grub
+    if [ -n "$sub" ]; then grub-set-default "${sub}>${entry}"; else grub-set-default "${entry}"; fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - workstation_console_kernel | default(false) | bool
+    - workstation_has_egress | default(false) | bool
+    - ansible_distribution == 'Kali'
+
+- name: Remove the Kali image's console auto-login overrides
+  # The genericcloud image ships agetty drop-ins that auto-login root on tty1 and
+  # on the serial console. On a box whose whole point is compartmentalisation, an
+  # unauthenticated root console is not acceptable, so they go. They are not owned
+  # by any dpkg package, so removal is permanent (apt will not put them back).
+  #
+  # This one needs no egress, so it applies from Phase 1 onwards.
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/getty@tty1.service.d/autologin.conf
+    - /etc/systemd/system/serial-getty@.service.d/autologin.conf
+  notify: Reload systemd and restart the tty1 getty
+
+- name: Set the workstation's console password
+  # Without this the console is diagnostic only: cloud-init sets lock_passwd, so
+  # the login prompt cannot be passed and a desktop greeter would be unusable.
+  # Set on the guest so we do not depend on the control node's crypt/passlib;
+  # chpasswd also unlocks the account cloud-init locked. Console/GUI only --
+  # SSH stays key-only (ssh_pwauth: false).
+  #
+  # Unset by default: adding a password to an anonymous engagement box is a
+  # deliberate decision, not a default. Set workstation_console_password in
+  # ansible/group_vars/role_workstation.yaml (or a vault) to enable it.
+  ansible.builtin.shell:
+    cmd: "echo '{{ ansible_user }}:{{ workstation_console_password }}' | chpasswd"
+  changed_when: false
+  no_log: true
+  when: (workstation_console_password | default('')) | length > 0
