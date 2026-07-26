@@ -1,28 +1,36 @@
 ---
-# The workstation is internal-only. In Phase 1 the gateway provides no egress
-# yet, so this host has no route to any package mirror and apt cannot work at
-# all -- that is the milestone, not a defect. An empty list makes the common
-# role's package task skip instead of spending the full apt timeout failing on
-# every run.
+# The workstation is internal-only: it has exactly one NIC, on a host-only switch
+# with no gateway of its own. Everything below therefore reaches the internet only
+# because the gateway forwards it into the WireGuard tunnel -- every package here
+# is downloaded over the VPN, never over the real IP. That ordering is the reason
+# these lists stayed empty until Phase 2 worked.
 #
-# Phase 2 gives the gateway a tunnel and forwards this segment through it; Phase 3
-# then installs the Kali toolset and Mullvad Browser here. At that point fill this
-# list (or drop the file to inherit group_vars/all.yaml).
-common_packages: []
+# Phase 3 adds the Kali toolset and Mullvad Browser on top of this base.
+common_packages:
+  - ca-certificates
+  - curl
+  - dnsutils
+  - git
+  - htop
+  - jq
+  - net-tools
+  - tmux
+  - tree
+  - vim
 
 # --- Egress-dependent features ----------------------------------------------
-# Both default to off because this host has no route off the internal segment in
-# Phase 1. Flip them together once Phase 2's gateway forwards traffic through the
-# VPN tunnel -- at which point Kali's kernel and desktop are downloaded through
-# the tunnel rather than over your real IP, which is the whole point of doing it
-# in that order.
+# Both were off through Phase 1, when this host had no route off the internal
+# segment at all. Phase 2's gateway now forwards it through the VPN tunnel, so
+# they are on -- and Kali's kernel is downloaded through the tunnel rather than
+# over the real IP, which is the whole point of doing it in this order.
 #
 # workstation_has_egress is the honest statement of fact ("the gateway forwards
 # this host's traffic now"); workstation_console_kernel is the feature that needs
-# it. Keeping them separate means enabling the feature too early fails with a
-# clear message instead of an apt timeout.
-workstation_has_egress: false
-workstation_console_kernel: false
+# it. They stay separate so that enabling the feature without the fact fails with
+# a clear message instead of an apt timeout. If the tunnel is ever removed, set
+# workstation_has_egress back to false FIRST.
+workstation_has_egress: true
+workstation_console_kernel: true
 
 # Console/GUI password for the workstation user. Empty = leave the account locked
 # as cloud-init created it, so the console is diagnostic only (you can read boot

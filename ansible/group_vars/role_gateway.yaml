@@ -30,8 +30,13 @@ wg_interface: wg0
 
 # MTU for the tunnel. WireGuard's default is 1420, but this tunnel runs over
 # QEMU's SLIRP NAT where the effective path MTU is smaller; too large silently
-# breaks large packets (TLS handshakes stall) while ping still works. Verified in
-# Task 7.
+# breaks large packets (TLS handshakes stall) while ping still works -- so ping
+# is NOT a test of this value.
+#
+# 1280 measured good from the workstation: two real HTTPS transfers (57 KB and
+# 139 KB) completed in about two seconds. If large transfers ever start stalling
+# while ping stays fine, this is the first thing to lower (1280 -> 1240 -> 1200),
+# followed by `make configure`.
 wg_mtu: 1280
 
 # Mullvad's resolver, reachable only inside the tunnel. Confirm against the
