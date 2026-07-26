@@ -11,7 +11,7 @@ load_config
 short="${1:?Usage: make ssh <short-name> (e.g. gateway or workstation)}"
 
 # Walk the fleet once to resolve the target's role and index, and to find the
-# gateway's index (its host port is 2200+index).
+# gateway's index (its host port comes from ssh_port_for).
 idx=0; found=0; known=""
 target_role=""; target_idx=0; gw_idx=0
 for entry in "${LAB_VMS[@]}"; do
@@ -29,11 +29,11 @@ done
 [[ "$gw_idx" -ne 0 ]] || die "No dual-NIC gateway in LAB_VMS: nothing can be reached."
 
 key="$(priv_key)"
-gw_port="$((2200 + gw_idx))"
+gw_port="$(ssh_port_for "$gw_idx")"
 common=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 
 if [[ "$(nic_layout_for_role "$target_role")" == "dual" ]]; then
-  port="$((2200 + target_idx))"
+  port="$(ssh_port_for "$target_idx")"
   log "Connecting to ${short} (127.0.0.1:${port})"
   exec ssh "${common[@]}" -p "$port" "${LAB_USER}@127.0.0.1"
 fi

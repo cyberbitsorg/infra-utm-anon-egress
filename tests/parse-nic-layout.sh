@@ -29,6 +29,12 @@ check "$(internal_ip_for extra 3)"          "10.20.0.13" "extra internal VM fall
 check "$(GATEWAY_INTERNAL_IP=10.20.0.254 internal_ip_for gateway 1)" "10.20.0.254" \
   "gateway IP honours GATEWAY_INTERNAL_IP"
 
+echo "ssh_port_for:"
+# The base must NOT be the sibling lab's 2200: two fleets up at once would fight
+# over the same host socket, and 'make ssh gateway' could land on the lab's Kali.
+check "$(ssh_port_for 1)" "2301" "index 1 gets 2301, clear of infra-utm-redteam-lab"
+check "$(ssh_port_for 3)" "2303" "port follows the index"
+
 echo "role_image:"
 IMAGES_DIR="/img"
 DEBIAN_IMG_URL="https://example.invalid/debian-12-genericcloud-arm64.qcow2"

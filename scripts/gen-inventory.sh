@@ -26,7 +26,7 @@ rows="$(cat)"
 
 priv="$(priv_key)"
 # The jump host for every internal-only VM: the gateway, over its host forward.
-# GATEWAY_PORT is exported by scripts/up.sh (the gateway's 2200+index port).
+# GATEWAY_PORT is exported by scripts/up.sh (see ssh_port_for in lib.sh).
 # This string ends up inside a single-quoted YAML scalar with the ProxyCommand
 # itself double-quoted, so it survives both the YAML and the ssh parser.
 gw_port="${GATEWAY_PORT:?GATEWAY_PORT not set: no dual-NIC gateway was provisioned}"

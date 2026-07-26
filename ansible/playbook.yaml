@@ -1,0 +1,30 @@
+---
+# Configures the two VMs after provisioning. Idempotent: safe to re-run.
+# Run subsets with tags, e.g. --tags gateway or --tags workstation.
+#
+# ORDER MATTERS. The workstation has no host port forward: its inventory entry
+# reaches it with a ProxyCommand through the gateway. The gateway play therefore
+# has to come first, and any future gateway change that breaks SSH forwarding
+# also cuts Ansible off from the workstation.
+
+- name: Base configuration for all hosts
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - role: common
+      tags: [common, base]
+
+- name: Configure gateway
+  hosts: role_gateway
+  become: true
+  roles:
+    - role: gateway
+      tags: [gateway]
+
+- name: Configure workstation
+  hosts: role_workstation
+  become: true
+  roles:
+    - role: workstation
+      tags: [workstation]

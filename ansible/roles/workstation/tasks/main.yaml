@@ -1,0 +1,15 @@
+---
+# Phase 1 stub. The real content -- the Kali toolset and Mullvad Browser for
+# application-layer fingerprint defense -- lands in Phase 3, once the gateway
+# actually provides egress. See docs/superpowers/plans/.
+#
+# Everything here must work with NO route off the internal segment: in Phase 1
+# this host cannot reach a package mirror at all, by design. Nothing in this file
+# may touch the network.
+- name: Mark workstation provisioned (Phase 1)
+  ansible.builtin.copy:
+    dest: /etc/anon-egress-role
+    content: "workstation\n"
+    owner: root
+    group: root
+    mode: "0644"

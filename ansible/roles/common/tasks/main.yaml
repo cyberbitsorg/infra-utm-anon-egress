@@ -9,6 +9,12 @@
     state: present
     update_cache: true
     cache_valid_time: 3600
+  # An internal-only host has no route to a package mirror until the gateway
+  # provides egress (Phase 2), so its group_vars set common_packages to an empty
+  # list. Skipping on empty keeps that a configuration choice rather than a
+  # guaranteed apt timeout, and the day the workstation does have egress the
+  # list is simply filled in.
+  when: common_packages | length > 0
 
 - name: Deploy MOTD
   ansible.builtin.copy:

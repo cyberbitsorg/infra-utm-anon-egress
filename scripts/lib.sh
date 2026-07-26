@@ -71,6 +71,17 @@ role_image() {
   esac
 }
 
+# Host SSH forward port for a VM index. Only a dual-NIC VM ever gets one.
+#
+# The base is 2300, NOT the sibling lab's 2200: infra-utm-redteam-lab hands its
+# index-1 VM 127.0.0.1:2201, and if both fleets are up at once QEMU cannot bind
+# the same host port twice. The failure is nasty rather than loud -- whichever
+# forward wins, 'make ssh gateway' can land you on the lab's Kali attacker
+# instead of this gateway. Different base, no overlap, and an anonymous
+# engagement box never shares a socket with a deliberately vulnerable VM.
+SSH_PORT_BASE=2300
+ssh_port_for() { echo "$(( SSH_PORT_BASE + ${1:?index required} ))"; }
+
 # NIC layout per role. The gateway keeps the two-NIC layout (NAT for internet +
 # the host SSH forward, plus the internal segment). Every other VM is
 # internal-only: a single host-mode NIC on the isolated segment, no NAT NIC at

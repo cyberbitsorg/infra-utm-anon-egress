@@ -25,7 +25,7 @@ nic_layout="$(nic_layout_for_role "$role")"
 # NAT NIC to forward through and must not be reachable from the host except by
 # hopping through the gateway, so its port is 0 (= none).
 if [[ "$nic_layout" == "dual" ]]; then
-  ssh_port="$((2200 + idx))"
+  ssh_port="$(ssh_port_for "$idx")"
 else
   ssh_port=0
 fi

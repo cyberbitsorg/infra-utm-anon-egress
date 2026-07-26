@@ -1,0 +1,11 @@
+---
+# The workstation is internal-only. In Phase 1 the gateway provides no egress
+# yet, so this host has no route to any package mirror and apt cannot work at
+# all -- that is the milestone, not a defect. An empty list makes the common
+# role's package task skip instead of spending the full apt timeout failing on
+# every run.
+#
+# Phase 2 gives the gateway a tunnel and forwards this segment through it; Phase 3
+# then installs the Kali toolset and Mullvad Browser here. At that point fill this
+# list (or drop the file to inherit group_vars/all.yaml).
+common_packages: []

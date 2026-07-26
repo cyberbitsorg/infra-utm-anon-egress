@@ -110,11 +110,11 @@ on purpose — the security property depends on it:
 
 | Role | NIC layout | Reached from the host by |
 |------|-----------|--------------------------|
-| `gateway` | `dual`: emulated NAT (internet + SSH forward) **and** internal NIC `10.20.0.1` | `ssh -p 2201 anon@127.0.0.1` |
+| `gateway` | `dual`: emulated NAT (internet + SSH forward) **and** internal NIC `10.20.0.1` | `ssh -p 2301 anon@127.0.0.1` |
 | anything else | `internal`: **only** the internal NIC, default route the gateway | ProxyJump through the gateway |
 
 The gateway must stay the **first** fleet entry: its host SSH port is
-`2200 + index`, and both the workstation's ProxyJump and `scripts/verify.sh`
+`2300 + index` (`ssh_port_for`), and both the workstation's ProxyJump and `scripts/verify.sh`
 derive that port from index 1.
 
 ## Threat model, honestly

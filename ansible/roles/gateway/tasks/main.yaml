@@ -1,0 +1,22 @@
+---
+# Phase 1 stub. The real content -- VPN client (Nym default, Mullvad fallback),
+# the fail-closed nftables kill-switch, a tunnel-bound resolver and IPv6 drop --
+# lands in Phase 2. See docs/superpowers/plans/.
+#
+# The marker file exists so 'make up' proves Ansible actually reached this host.
+- name: Mark gateway provisioned (Phase 1)
+  ansible.builtin.copy:
+    dest: /etc/anon-egress-role
+    content: "gateway\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Confirm IPv4 forwarding is enabled (set by cloud-init)
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-gateway-forward.conf
+    sysctl_set: true
+    state: present
+    reload: true
