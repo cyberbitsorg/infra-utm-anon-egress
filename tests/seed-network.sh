@@ -17,10 +17,16 @@ gw="$(render_network_config gateway 52:54:00:AA:00:01 52:54:00:10:20:01 10.20.0.
 ws="$(render_network_config workstation "" 52:54:00:10:20:02 10.20.0.10 internal)"
 
 echo "gateway (dual):"
-want "$gw" 'dhcp4: true'                  "gateway has a DHCP NAT NIC"
 want "$gw" '52:54:00:AA:00:01'            "gateway matches the NAT NIC by MAC"
+want "$gw" '10\.0\.2\.15/24'              "gateway WAN NIC is statically addressed"
+want "$gw" 'via: 10\.0\.2\.2'             "gateway WAN default route is the SLIRP gateway"
+want "$gw" '10\.0\.2\.3'                  "gateway has a bootstrap nameserver (dropped by nftables later)"
 want "$gw" '10\.20\.0\.1/24'              "gateway has its internal segment address"
 want "$gw" '52:54:00:10:20:01'            "gateway matches the internal NIC by MAC"
+# No DHCP anywhere: a lease would need a DHCP allow rule in the nftables output
+# chain, and the whole point of Phase 2 is that the WAN NIC emits nothing but
+# WireGuard.
+want_no "$gw" 'dhcp4: true'               "gateway must NOT use DHCP on the WAN NIC"
 
 echo "workstation (internal-only):"
 want "$ws" '10\.20\.0\.10/24'             "workstation has its internal segment address"

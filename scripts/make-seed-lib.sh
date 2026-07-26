@@ -9,9 +9,9 @@
 #
 # Two shapes, decided by the NIC layout (nic_layout_for_role in lib.sh):
 #
-#   dual      the gateway: a DHCP NAT NIC for internet plus a static address on
-#             the internal segment. It is the router, so it takes no default
-#             route from the internal side.
+#   dual      the gateway: a statically addressed WAN NIC for internet plus a
+#             static address on the internal segment. It is the router, so it
+#             takes no default route from the internal side.
 #   internal  everything else: ONE NIC, static, with both the default route and
 #             DNS pointing at the gateway. No NAT NIC is described at all,
 #             because the VM does not have one -- see create-vm.applescript.
@@ -20,6 +20,14 @@
 # gateway4 is deprecated in current netplan/cloud-init and logs a deprecation
 # warning on every boot, while `routes:` is supported by every renderer these
 # images use.
+#
+# The WAN NIC is STATICALLY addressed, not DHCP. QEMU SLIRP hands out a
+# deterministic 10.0.2.15/24 with gateway 10.0.2.2 and DNS 10.0.2.3, so the lease
+# buys nothing and would force a DHCP allow rule into the nftables output chain --
+# on an interface whose entire purpose is to emit nothing but WireGuard. The
+# 10.0.2.3 nameserver is a BOOTSTRAP-ONLY path: the gateway needs DNS to apt
+# install wireguard-tools and unbound before either exists. Task 4's ruleset drops
+# :53 off the WAN, and Task 5 repoints the gateway at unbound.
 render_network_config() {
   local role="$1" mac_nat="$2" mac_internal="$3" internal_ip="$4" nic_layout="$5"
   if [[ "$nic_layout" == "dual" ]]; then
@@ -29,11 +37,21 @@ ethernets:
   nat:
     match:
       macaddress: "${mac_nat}"
-    dhcp4: true
+    dhcp4: false
+    dhcp6: false
+    addresses:
+      - 10.0.2.15/24
+    routes:
+      - to: default
+        via: 10.0.2.2
+    nameservers:
+      addresses:
+        - 10.0.2.3
   internal:
     match:
       macaddress: "${mac_internal}"
     dhcp4: false
+    dhcp6: false
     addresses:
       - ${internal_ip}/24
 EOF
