@@ -1,7 +1,11 @@
 #cloud-config
-# Base bootstrap for every lab VM. Placeholders (@@...@@) are filled in by
-# scripts/make-seed.sh. Role-specific software is installed by Ansible, not here,
-# so a single bootstrap keeps all VMs identical at first boot.
+# Base bootstrap. Placeholders (@@...@@) are filled in by scripts/make-seed.sh.
+# Role-specific software is installed by Ansible, not here.
+#
+# make-seed.sh picks ONE template per role: cloud-init/<role>.user-data.yaml if
+# it exists, otherwise this file. There is no merging, so each role template is a
+# full copy of this body plus its own additions. Keep changes here in sync with
+# cloud-init/gateway.user-data.yaml and cloud-init/workstation.user-data.yaml.
 
 hostname: "@@HOSTNAME@@"
 preserve_hostname: false

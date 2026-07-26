@@ -42,7 +42,10 @@ require_lab_conf_vars() {
 }
 
 load_config() {
-  local cfg="${REPO_ROOT}/lab.conf"
+  # LAB_CONF overrides the config path. Only the unit tests set it, so they can
+  # exercise scripts that call load_config against a throwaway config instead of
+  # requiring (or worse, reading) the operator's real lab.conf.
+  local cfg="${LAB_CONF:-${REPO_ROOT}/lab.conf}"
   [[ -f "$cfg" ]] || die "lab.conf not found. Run: cp lab.conf.example lab.conf"
   # shellcheck disable=SC1090
   source "$cfg"

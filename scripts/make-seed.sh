@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Render a cloud-init NoCloud seed ISO for one VM.
-# Usage: make-seed.sh <short-name> <role> <mac-nat> <mac-lab> <lab-ip>
+# Usage: make-seed.sh <short-name> <role> <mac-nat> <mac-internal> <internal-ip> <nic-layout>
+# mac-nat is ignored for an internal-only layout (that VM has no NAT NIC), but is
+# still passed positionally so the argument list is the same for every role.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/make-seed-lib.sh"
 
 load_config
 short="${1:?short name required}"
 role="${2:?role required}"
-mac_nat="${3:?nat mac required}"
-mac_lab="${4:?lab mac required}"
-lab_ip="${5:?lab ip required}"
+mac_nat="${3-}"
+mac_internal="${4:?internal mac required}"
+internal_ip="${5:?internal ip required}"
+nic_layout="${6:?nic layout required}"
 
 mkdir -p "$GEN_DIR"
 work="$(mktemp -d)"
@@ -34,22 +38,9 @@ instance-id: ${hostname}
 local-hostname: ${hostname}
 EOF
 
-# network-config v2: NAT NIC via DHCP (internet), lab NIC static (isolated).
-# Interfaces are matched by MAC so names (enp0sX) do not matter.
-cat > "${work}/network-config" <<EOF
-version: 2
-ethernets:
-  nat:
-    match:
-      macaddress: "${mac_nat}"
-    dhcp4: true
-  lab:
-    match:
-      macaddress: "${mac_lab}"
-    dhcp4: false
-    addresses:
-      - ${lab_ip}/24
-EOF
+# network-config v2, shaped by the role's NIC layout. See make-seed-lib.sh.
+render_network_config "$role" "$mac_nat" "$mac_internal" "$internal_ip" \
+  "$nic_layout" > "${work}/network-config"
 
 seed="${GEN_DIR}/${hostname}.seed.iso"
 # hdiutil makehybrid refuses to overwrite an existing file, so make re-runs
