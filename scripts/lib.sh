@@ -58,12 +58,42 @@ vm_name() { echo "${LAB_PREFIX}-$1"; }
 # Private key path derived from the public key in lab.conf.
 priv_key() { echo "${LAB_SSH_KEY%.pub}"; }
 
-# Absolute path to the base disk image for a role. The attacker runs Kali; every
-# other role runs Ubuntu. Both live in IMAGES_DIR after scripts/fetch-images.sh.
+# Absolute path to the base disk image for a role. The gateway runs Debian (a
+# small, stable router); every other role runs Kali. Both live in IMAGES_DIR
+# after scripts/fetch-images.sh.
 role_image() {
   case "$1" in
-    attacker) echo "${IMAGES_DIR}/${KALI_IMG_FILE}" ;;
-    *)        echo "${IMAGES_DIR}/$(basename "$UBUNTU_IMG_URL")" ;;
+    gateway) echo "${IMAGES_DIR}/$(basename "$DEBIAN_IMG_URL")" ;;
+    *)       echo "${IMAGES_DIR}/${KALI_IMG_FILE}" ;;
+  esac
+}
+
+# NIC layout per role. The gateway keeps the two-NIC layout (NAT for internet +
+# the host SSH forward, plus the internal segment). Every other VM is
+# internal-only: a single host-mode NIC on the isolated segment, no NAT NIC at
+# all, so it has no path to the internet except through the gateway.
+#
+# This is the single source of truth for the repo's security property, and the
+# default is deliberately the safe one: a role nobody thought about gets
+# 'internal', never a NAT NIC.
+nic_layout_for_role() {
+  case "$1" in
+    gateway) echo "dual" ;;
+    *)       echo "internal" ;;
+  esac
+}
+
+# Internal-segment IP for a role. The two named roles get fixed, memorable
+# addresses (gateway .1 = the router everything else routes through, workstation
+# .10); any additional internal-only VM falls back to 10.20.0.(10+idx). Keyed on
+# role rather than index so the workstation keeps the same address whatever
+# order the fleet is written in -- verify.sh and the ProxyJump both hardcode it.
+internal_ip_for() {
+  local role="${1:?role required}" idx="${2:?index required}"
+  case "$role" in
+    gateway)     echo "${GATEWAY_INTERNAL_IP:-10.20.0.1}" ;;
+    workstation) echo "10.20.0.10" ;;
+    *)           echo "10.20.0.$((10 + idx))" ;;
   esac
 }
 

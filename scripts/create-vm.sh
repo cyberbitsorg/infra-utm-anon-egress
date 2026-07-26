@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Create, seed and start one lab VM, or bring an existing one in line with the
-# fleet.
+# Create, seed and start one VM, or bring an existing one in line with the fleet.
 # Usage: create-vm.sh <index> <short-name> <role> <cpu> <ram-mib> <disk-gb>
-# Index (>=1) drives deterministic MAC addresses, lab IP and host SSH port.
+# Index (>=1) drives the deterministic MAC addresses and, for a dual-NIC role,
+# the host SSH port. The NIC layout and the internal IP come from the ROLE
+# (see nic_layout_for_role / internal_ip_for in lib.sh), not the index.
 # Resources come from the caller (scripts/up.sh parses them out of LAB_VMS), so
 # this script never reads LAB_CPU/LAB_RAM/LAB_DISK_GB itself.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -17,9 +18,17 @@ disk_gb="${6:?disk size in GB required}"
 
 name="$(vm_name "$short")"
 mac_nat="$(printf '52:54:00:AA:00:%02X' "$idx")"
-mac_lab="$(printf '52:54:00:10:10:%02X' "$idx")"
-lab_ip="10.10.10.$((10 + idx))"
-ssh_port="$((2200 + idx))"
+mac_internal="$(printf '52:54:00:10:20:%02X' "$idx")"
+internal_ip="$(internal_ip_for "$role" "$idx")"
+nic_layout="$(nic_layout_for_role "$role")"
+# Only the dual-NIC gateway gets a host SSH forward. An internal-only VM has no
+# NAT NIC to forward through and must not be reachable from the host except by
+# hopping through the gateway, so its port is 0 (= none).
+if [[ "$nic_layout" == "dual" ]]; then
+  ssh_port="$((2200 + idx))"
+else
+  ssh_port=0
+fi
 
 # Bring an existing VM in line with the fleet: cpu/ram through UTM. A
 # fleet disk= change cannot be applied to a VM that already exists (see the
@@ -101,7 +110,7 @@ reconcile_existing_vm() {
 # An existing VM is reconciled, not recreated.
 if vm_exists "$name"; then
   reconcile_existing_vm "$cpu" "$ram" "$disk_gb"
-  echo "${name} ${ssh_port} ${lab_ip}"
+  echo "${name} ${ssh_port} ${internal_ip} ${nic_layout}"
   exit 0
 fi
 
@@ -142,15 +151,19 @@ fi
 
 log "Building cloud-init seed for ${name}"
 seed="$(scripts_dir="$(dirname "${BASH_SOURCE[0]}")"; "${scripts_dir}/make-seed.sh" \
-  "$short" "$role" "$mac_nat" "$mac_lab" "$lab_ip" | tail -1)"
+  "$short" "$role" "$mac_nat" "$mac_internal" "$internal_ip" "$nic_layout" | tail -1)"
 
-log "Creating VM ${name} in UTM (mem ${ram}MiB, ${cpu} cpu, disk ${disk_gb}G, ssh->127.0.0.1:${ssh_port})"
+if [[ "$nic_layout" == "dual" ]]; then
+  log "Creating VM ${name} in UTM (${nic_layout} NIC, mem ${ram}MiB, ${cpu} cpu, disk ${disk_gb}G, ssh->127.0.0.1:${ssh_port})"
+else
+  log "Creating VM ${name} in UTM (${nic_layout} NIC only at ${internal_ip}, no NAT, no host forward; mem ${ram}MiB, ${cpu} cpu, disk ${disk_gb}G)"
+fi
 vm_id="$(osascript "$(dirname "${BASH_SOURCE[0]}")/create-vm.applescript" \
-  "$name" "$vm_disk" "$seed" "$ram" "$cpu" "$mac_nat" "$mac_lab" "$ssh_port")"
+  "$name" "$vm_disk" "$seed" "$ram" "$cpu" "$mac_nat" "$mac_internal" "$ssh_port" "$nic_layout")"
 ok "Created ${name} (${vm_id})"
 
 log "Starting ${name}"
 start_vm "$name"
 
-# Emit a line the orchestrator parses: <name> <ssh_port> <lab_ip>
-echo "${name} ${ssh_port} ${lab_ip}"
+# Emit a line the orchestrator parses: <name> <ssh_port> <internal_ip> <nic_layout>
+echo "${name} ${ssh_port} ${internal_ip} ${nic_layout}"
