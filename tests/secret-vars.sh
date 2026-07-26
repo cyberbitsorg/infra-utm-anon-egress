@@ -50,6 +50,15 @@ ruby -ryaml -e 'd = YAML.safe_load(STDIN.read); exit(d.nil? || d.is_a?(Hash) ? 0
 [[ "$(grep -c "simple123" <<<"$got")" == "1" ]] \
   || note "a secret appears more than once (a comment or echo is leaking it)"
 
+# MULLVAD_WG_CONFIG is a path, not a secret, but it travels the same channel so
+# there is one way in and one way out for everything .env carries.
+got_cfg="$(MULLVAD_WG_CONFIG="secrets/mullvad-wg.conf" render_secret_vars)"
+[[ "$(yaml_value "$got_cfg" mullvad_wg_config)" == "secrets/mullvad-wg.conf" ]] \
+  || note "MULLVAD_WG_CONFIG does not round-trip"
+got_nocfg="$(MULLVAD_WG_CONFIG="" render_secret_vars)"
+[[ "$(yaml_value "$got_nocfg" mullvad_wg_config)" == "<<MISSING>>" ]] \
+  || note "an empty MULLVAD_WG_CONFIG must not be emitted"
+
 if [[ "$fail" -eq 0 ]]; then
   echo "secret-vars: OK"
 else

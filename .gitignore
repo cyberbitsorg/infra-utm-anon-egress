@@ -20,6 +20,8 @@ lab.conf
 id_ed25519
 id_ed25519.pub
 .vault_pass
+secrets/*
+!secrets/.gitkeep
 
 # Logs
 *.log

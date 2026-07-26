@@ -98,7 +98,7 @@ load_env() {
 # group_vars defaults keep deciding what "no password" means.
 render_secret_vars() {
   local name val esc
-  for name in GATEWAY_CONSOLE_PASSWORD WORKSTATION_CONSOLE_PASSWORD; do
+  for name in GATEWAY_CONSOLE_PASSWORD WORKSTATION_CONSOLE_PASSWORD MULLVAD_WG_CONFIG; do
     eval "val=\${${name}:-}"
     [[ -n "$val" ]] || continue
     # UNQUOTED assignment on purpose: it makes \' a literal ' in both pattern and

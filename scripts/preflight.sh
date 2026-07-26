@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verify the host can build the lab and generate an SSH key if needed.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/wg-lib.sh"
 
 require_macos
 load_config
@@ -72,6 +73,28 @@ else
   done < "${REPO_ROOT}/.env.example"
   ok "Generated ${ENV_FILE} (mode 600) with console passwords for both VMs"
   log "Read them with: grep CONSOLE_PASSWORD .env"
+fi
+
+# Validate the WireGuard config early. Finding out it is malformed here costs
+# seconds; finding out after the ruleset is installed costs a debugging session
+# with no egress.
+load_env
+if [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
+  wg_cfg="${MULLVAD_WG_CONFIG}"
+  [[ "$wg_cfg" = /* ]] || wg_cfg="${REPO_ROOT}/${wg_cfg}"
+  log "Checking WireGuard config: ${wg_cfg}"
+  if validate_wg_config "$wg_cfg"; then
+    ok "WireGuard config is usable (endpoint $(wg_endpoint_ip "$wg_cfg"):$(wg_endpoint_port "$wg_cfg"))"
+    cfg_perms="$(stat -f '%Lp' "$wg_cfg" 2>/dev/null || echo '')"
+    case "$cfg_perms" in
+      600|400) ;;
+      *) warn "${wg_cfg} is mode ${cfg_perms}; it holds a private key. Fix with: chmod 600 ${wg_cfg}" ;;
+    esac
+  else
+    die "The WireGuard config is not usable (reason above). Fix it before 'make up'."
+  fi
+else
+  warn "MULLVAD_WG_CONFIG is not set in .env: the gateway will have no tunnel and the workstation no egress."
 fi
 
 ok "Preflight passed"
