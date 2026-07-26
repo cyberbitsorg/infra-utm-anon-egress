@@ -12,14 +12,24 @@
     group: root
     mode: "0644"
 
-- name: Confirm IPv4 forwarding is enabled (set by cloud-init)
+- name: Keep persistent IPv4 forwarding OFF (nftables switches it on)
+  # Deliberately 0, and deliberately not applied here. Forwarding is granted by
+  # nftables.service's ExecStartPost once the kill-switch ruleset has actually
+  # loaded, and withdrawn by its ExecStopPost. If this file asserted 1, a failed
+  # nftables.service would leave the kernel with no ruleset at all -- default
+  # accept -- while still forwarding the workstation's traffic straight out the
+  # WAN in the clear. The absence of rules is the danger, so the absence of rules
+  # must also mean the absence of forwarding.
+  #
+  # sysctl_set/reload are false so this only writes the boot default; the live
+  # value belongs to nftables.service and must not be stomped mid-run.
   ansible.posix.sysctl:
     name: net.ipv4.ip_forward
-    value: "1"
+    value: "0"
     sysctl_file: /etc/sysctl.d/99-gateway-forward.conf
-    sysctl_set: true
+    sysctl_set: false
     state: present
-    reload: true
+    reload: false
 
 - name: Set the gateway's console password
   # cloud-init locks the user's password, so without this the UTM console can

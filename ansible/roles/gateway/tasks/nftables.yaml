@@ -18,6 +18,29 @@
     validate: "/usr/sbin/nft -c -f %s"
   notify: Reload nftables
 
+- name: Ensure the nftables drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/nftables.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Enable IPv4 forwarding only once the ruleset is loaded
+  # ExecStartPost runs only if the unit started successfully, so a ruleset that
+  # fails to load leaves forwarding off and the workstation with no path at all.
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nftables.service.d/10-enable-forwarding.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role: gateway).
+      [Service]
+      ExecStartPost=/sbin/sysctl -w net.ipv4.ip_forward=1
+      ExecStopPost=/sbin/sysctl -w net.ipv4.ip_forward=0
+  notify: Restart nftables
+
 - name: Enable nftables at boot
   # `state: started` also LOADS the ruleset on the first run, before the handler
   # would: from this task onwards the gateway is closed. Nothing between here and
@@ -38,6 +61,16 @@
 - name: Order WireGuard after nftables
   # THE fail-closed mechanism. Without this, systemd may start wg-quick first and
   # a boot could route before the ruleset exists.
+  #
+  # PartOf= additionally makes the tunnel follow the firewall's lifecycle, which
+  # is the honest dependency: wg-quick installs its own `table ip wg-quick-wg0`
+  # for packet marking, and Debian's nftables.service runs `nft flush ruleset` on
+  # stop, which destroys it. Without PartOf, `systemctl stop nftables` leaves
+  # wg-quick "running" with its marking table silently gone -- no handshake, no
+  # egress, and nothing that says why. PartOf restarts wg-quick with nftables and
+  # stops it alongside, so the tunnel is either fully backed by a ruleset or not
+  # up at all. (Verified: without this, egress did not return after a stop/start
+  # cycle until wg-quick was restarted by hand.)
   #
   # Requires=, not Wants=: Wants= is advisory, so if nftables.service ever failed
   # (a hand-edited unparseable file, a missing /etc/nftables.conf) wg-quick would
@@ -61,6 +94,7 @@
       [Unit]
       After=nftables.service
       Requires=nftables.service
+      PartOf=nftables.service
   notify: Restart WireGuard
 
 - name: Enable WireGuard at boot

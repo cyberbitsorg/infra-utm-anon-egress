@@ -11,7 +11,24 @@
 # tasks/wireguard.yaml). Hardcoding enp0s1/enp0s2 would produce a ruleset that
 # reads correctly and leaks the day the kernel renames a NIC.
 
-flush ruleset
+# Replace ONLY our own tables, never `flush ruleset`.
+#
+# `flush ruleset` also destroys `table ip wg-quick-wg0`, which wg-quick installs
+# to mark and route its own packets. Losing it does not leak -- it fails closed --
+# but it kills the tunnel completely: no handshake, no egress for the gateway or
+# the workstation, until wg-quick is restarted. Since our own handlers reload this
+# ruleset whenever it changes, `flush ruleset` would silently break the box on
+# every edit. Verified: after `systemctl restart nftables` the wg-quick table was
+# gone and egress only returned after `systemctl restart wg-quick@wg0`.
+#
+# The bare `table` line before each `delete` creates it if absent, so the delete
+# cannot fail on a fresh boot. The whole file still applies atomically.
+table inet filter
+delete table inet filter
+table ip nat
+delete table ip nat
+table ip6 filter
+delete table ip6 filter
 
 table inet filter {
   chain input {

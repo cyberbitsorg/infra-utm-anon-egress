@@ -6,10 +6,12 @@
 # cloud-init/default.user-data.yaml and appends its own write_files/runcmd items.
 # Keep it in sync with that file.
 #
-# Forwarding is enabled at first boot on purpose, even though nothing is routed
-# yet: it is idempotent, harmless while nftables is default-drop, and it means
-# Phase 2 (VPN + kill-switch) does not have to reboot the gateway to route.
-# Egress control is nftables' job, not the sysctl's.
+# Forwarding is OFF at first boot on purpose (Task 4b): the gateway role's
+# nftables.service drop-in is the only thing that turns it on, via
+# ExecStartPost, once the kill-switch ruleset has actually loaded. If
+# forwarding defaulted to on here, a failed nftables.service would leave the
+# kernel with no ruleset at all -- default accept -- and the workstation's
+# traffic would route straight out the WAN in the clear.
 
 hostname: "@@HOSTNAME@@"
 preserve_hostname: false
@@ -56,7 +58,11 @@ write_files:
   # forward at all.
   - path: /etc/sysctl.d/99-gateway-forward.conf
     content: |
-      net.ipv4.ip_forward=1
+      # Forwarding is OFF by default and switched on by nftables.service only
+      # after the kill-switch ruleset has actually loaded (see the gateway role).
+      # If the ruleset ever fails to load, the kernel has no rules at all --
+      # default accept -- so forwarding must not already be enabled.
+      net.ipv4.ip_forward=0
 
 package_update: true
 packages:
