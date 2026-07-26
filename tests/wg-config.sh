@@ -45,6 +45,72 @@ AllowedIPs = 0.0.0.0/0
 Endpoint = 193.138.218.220:3004
 EOF
 
+# IPv6 entries FIRST in a three-entry Address list, and first-of-two in
+# AllowedIPs. The original sed-based stripper only matched a v6 entry preceded
+# by a comma, so a leading v6 entry (no comma before it) survived untouched.
+cat > "${tmp}/v6first.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = fc00::1/128,10.66.1.2/32,10.77.3.4/32
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = ::/0,0.0.0.0/0
+Endpoint = 193.138.218.220:3004
+EOF
+
+# Address is IPv6-only: stripping it must leave nothing, and validate_wg_config
+# must refuse rather than hand sanitize_wg_config a now-addressless interface.
+cat > "${tmp}/v6only-address.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = fc00::1/128
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 193.138.218.220:3004
+EOF
+
+# AllowedIPs is IPv6-only: same refusal, different field.
+cat > "${tmp}/v6only-allowedips.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = 10.66.12.34/32
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = ::/0
+Endpoint = 193.138.218.220:3004
+EOF
+
+# A trailing comment on the Endpoint line. Without stripping it, the port
+# parses as "3004 # note" and validate_wg_config rejects a perfectly valid
+# config with a confusing "not numeric" message.
+cat > "${tmp}/comment-endpoint.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = 10.66.12.34/32
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 1.2.3.4:3004 # note
+EOF
+
+# Mullvad's "local network sharing" option injects PostUp/PostDown/PreUp/PreDown
+# hooks that run firewall rules. wg-quick must never manage firewalling --
+# nftables owns egress -- so sanitize_wg_config must strip all four.
+cat > "${tmp}/hooks.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = 10.66.12.34/32
+PostUp = iptables -A FORWARD -i %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -j ACCEPT
+PreUp = echo pre-up
+PreDown = echo pre-down
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 193.138.218.220:3004
+EOF
+
 echo "wg_endpoint_ip / wg_endpoint_port:"
 [[ "$(wg_endpoint_ip "${tmp}/good.conf")" == "193.138.218.220" ]] || note "endpoint IP not parsed"
 [[ "$(wg_endpoint_port "${tmp}/good.conf")" == "3004" ]] || note "endpoint port not parsed"
@@ -62,6 +128,18 @@ fi
 if validate_wg_config "${tmp}/does-not-exist.conf" 2>/dev/null; then
   note "a missing file must be refused"
 fi
+if validate_wg_config "${tmp}/v6only-address.conf" 2>/dev/null; then
+  note "an IPv6-only Address must be refused (no IPv4 address would remain)"
+fi
+if validate_wg_config "${tmp}/v6only-allowedips.conf" 2>/dev/null; then
+  note "an IPv6-only AllowedIPs must be refused (no IPv4 route would remain)"
+fi
+
+echo "Endpoint with a trailing comment:"
+[[ "$(wg_endpoint_port "${tmp}/comment-endpoint.conf")" == "3004" ]] \
+  || note "a trailing comment on Endpoint corrupts the parsed port"
+validate_wg_config "${tmp}/comment-endpoint.conf" 2>/dev/null \
+  || note "a valid config with a trailing Endpoint comment must still be accepted"
 
 echo "sanitize_wg_config:"
 san="$(sanitize_wg_config "${tmp}/good.conf")"
@@ -75,5 +153,24 @@ grep -q 'PrivateKey' <<<"$san" || note "the private key must survive"
 # The sanitised output must still be a config wg-quick accepts: both sections present.
 grep -q '^\[Interface\]' <<<"$san" || note "[Interface] section lost"
 grep -q '^\[Peer\]' <<<"$san"      || note "[Peer] section lost"
+
+echo "sanitize_wg_config (IPv6 in any position):"
+san_first="$(sanitize_wg_config "${tmp}/v6first.conf")"
+grep -q 'fc00:' <<<"$san_first" && note "a leading IPv6 Address entry must be stripped"
+grep -q '::/0'  <<<"$san_first" && note "a leading IPv6 AllowedIPs entry must be stripped"
+grep -q '10\.66\.1\.2/32' <<<"$san_first" || note "first surviving IPv4 Address entry lost"
+grep -q '10\.77\.3\.4/32' <<<"$san_first" || note "second surviving IPv4 Address entry lost"
+# Exact-line checks: the two survivors must be joined by a single comma, with
+# no leading, trailing, or doubled comma left where the v6 entry used to be.
+grep -qE '^Address = 10\.66\.1\.2/32,10\.77\.3\.4/32$' <<<"$san_first" \
+  || note "Address not cleanly rejoined after stripping a leading IPv6 entry"
+grep -qE '^AllowedIPs = 0\.0\.0\.0/0$' <<<"$san_first" \
+  || note "AllowedIPs not cleanly rejoined after stripping a leading IPv6 entry"
+grep -qE ',,|= ,|,$' <<<"$san_first" && note "stray comma left in sanitized output"
+
+echo "sanitize_wg_config (Post/Pre hooks):"
+san_hooks="$(sanitize_wg_config "${tmp}/hooks.conf")"
+grep -qE '^(PostUp|PostDown|PreUp|PreDown)' <<<"$san_hooks" \
+  && note "PostUp/PostDown/PreUp/PreDown must be stripped (wg-quick must not manage firewalling)"
 
 if [[ "$fail" -eq 0 ]]; then echo "wg-config: OK"; else echo "wg-config: FAILED"; exit 1; fi
