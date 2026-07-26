@@ -15,13 +15,23 @@
 #   test, and an active kill-switch test that drops the tunnel and watches the
 #   WAN NIC directly.
 #
+# THE RULE THIS FILE IS BUILT AROUND: silence is never scored as security. Every
+# probe must be able to say "I ran and the answer was no" separately from "I did
+# not run". An ssh hop that fails, a tool that is missing, a cached DNS answer or
+# a traffic generator that emits nothing all produce the same quiet output as a
+# perfectly closed gateway -- and each one of those has, at some point during
+# development, turned this suite green while something was actually open. So:
+# probes return explicit tokens, captures carry their own liveness proof, and
+# anything ambiguous is reported as a FAILURE, never as a pass.
+#
 # Both phases assert NEGATIVES. "No egress" can only ever be tested against the
 # vectors below, so this is not proof of anonymity -- it is proof that these
 # specific vectors are closed.
 #
 # Nothing here needs a package installed in a guest: probes use bash's /dev/tcp,
 # ping, and python3, all of which both images already ship (cloud-init is
-# Python). The workstation deliberately has no curl and no dig.
+# Python). The workstation deliberately has no curl and no dig. The gateway needs
+# tcpdump, which the gateway role installs for exactly this reason.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_config
 
@@ -50,14 +60,55 @@ fails=0
 note_fail() { printf '%s%s%s %s\n' "$(_c '1;31')" "FAIL" "$(_c 0)" "$*" >&2; fails=$((fails + 1)); }
 
 # on_ws <ip> <command...>: run a command on an internal-only VM through the jump.
+# on_gw <command...>:      run a command on the gateway over its host port forward.
+#
+# `-n` on both is load-bearing, not tidiness. Without it ssh inherits the caller's
+# stdin, and the per-VM loop below is fed by a here-string: the first ssh drains
+# it, the next `read` hits EOF, and every internal VM after the first is silently
+# never verified. The suite then reports all checks passed on a fleet it only
+# partly looked at.
 on_ws() {
   local ip="$1"; shift
-  ssh "${jump[@]}" "${LAB_USER}@${ip}" "$@"
+  ssh -n "${jump[@]}" "${LAB_USER}@${ip}" "$@"
 }
 
-# on_gw <command...>: run a command on the gateway over its host port forward.
 on_gw() {
-  ssh "${ssh_common[@]}" -p "$gw_port" "${LAB_USER}@127.0.0.1" "$@"
+  ssh -n "${ssh_common[@]}" -p "$gw_port" "${LAB_USER}@127.0.0.1" "$@"
+}
+
+# --- probes that cannot be confused with a broken transport ------------------
+#
+# ssh returns 255 when the hop itself fails (a ProxyCommand race, a
+# ConnectTimeout under load, sshd's MaxStartups) -- and non-zero is exactly what
+# a blocked probe returns too. Testing `if on_ws ...` therefore scores a failed
+# connection as "the packet was blocked": a green kill-switch result for a check
+# that never ran. These helpers make the guest say which happened, so the
+# ambiguous case is distinguishable and can be failed loudly.
+ws_probe() {
+  local ip="$1" cmd="$2"
+  on_ws "$ip" "if ${cmd}; then echo REACHED; else echo BLOCKED; fi" 2>/dev/null | tr -d '\r' || true
+}
+
+gw_probe() {
+  on_gw "if ${1}; then echo REACHED; else echo BLOCKED; fi" 2>/dev/null | tr -d '\r' || true
+}
+
+# expect_blocked <result> <ok msg> <leak msg> <probe name>
+expect_blocked() {
+  case "$1" in
+    BLOCKED) ok "$2" ;;
+    REACHED) note_fail "$3" ;;
+    *)       note_fail "the $4 probe did not run (transport failure); leak status UNKNOWN and deliberately not scored as a pass" ;;
+  esac
+}
+
+# expect_reached <result> <ok msg> <fail msg> <probe name>
+expect_reached() {
+  case "$1" in
+    REACHED) ok "$2" ;;
+    BLOCKED) note_fail "$3" ;;
+    *)       note_fail "the $4 probe did not run (transport failure); status UNKNOWN" ;;
+  esac
 }
 
 # py_on_ws <ip> <program>: run a python3 program on an internal VM.
@@ -65,14 +116,12 @@ on_gw() {
 # Base64 because the program travels through ssh's remote shell as well as the
 # local one. Quoting a multi-line program through two shells reliably produces a
 # syntax error rather than an answer, and a probe that errors out looks exactly
-# like a probe that was correctly blocked -- a false pass in a leak test.
+# like a probe that was correctly blocked.
 py_on_ws() {
   local ip="$1" src="$2" b64
   b64="$(printf '%s' "$src" | base64 | tr -d '\n')"
   on_ws "$ip" "python3 -c \"import base64;exec(base64.b64decode('${b64}'))\""
 }
-
-# --- probe programs ----------------------------------------------------------
 
 # dns_udp_probe <resolver> [qname] [timeout]
 #
@@ -105,15 +154,6 @@ print(codes.get(data[3] & 0x0F, "RCODE%d" % (data[3] & 0x0F)))
 PY
 }
 
-# A name no cache can have seen before. The kill-switch DNS check is worthless
-# without one: unbound and the workstation's own systemd-resolved both cache, and
-# the checks earlier in this run have just warmed them with example.com. Asking
-# for that name again with the tunnel down returns a cached answer instantly and
-# looks exactly like a DNS leak. (It reported one, before this existed.)
-uncached_name() {
-  printf 'v%s%s.example.com' "$RANDOM" "$RANDOM"
-}
-
 # Prints Mullvad's verdict on where the caller egresses from.
 mullvad_check_probe() {
   cat <<'PY'
@@ -126,43 +166,117 @@ except Exception as e:
 PY
 }
 
-# --- phase detection ---------------------------------------------------------
+# A name no cache can have seen before. Any DNS check that must distinguish
+# "resolution works" from "resolution is severed" needs one: unbound on the
+# gateway and systemd-resolved on the workstation both cache, so re-asking for a
+# name an earlier check just warmed returns instantly from cache and looks
+# exactly like a live resolver. (It did: the kill-switch DNS check reported a
+# leak that was nothing but a cache hit.)
+uncached_name() {
+  printf 'v%s%s.example.com' "$RANDOM" "$RANDOM"
+}
 
-# `sudo` is not optional here: /etc/wireguard is 0700 root, so an unprivileged
-# `test -f` cannot even traverse it and reports "no tunnel" on a fully configured
-# gateway -- which silently downgrades this whole script to the Phase 1 contract
-# and then fails it, because Phase 2 egress is supposed to work.
-if on_gw "sudo test -f /etc/wireguard/wg0.conf" >/dev/null 2>&1; then
-  PHASE=2
-  log "Tunnel configured on the gateway: verifying the Phase 2 contract"
-else
-  PHASE=1
-  log "No tunnel on the gateway: verifying the Phase 1 contract (zero egress)"
-fi
+# --- phase detection ---------------------------------------------------------
+#
+# sudo is required: /etc/wireguard is 0700 root, so an unprivileged `test -f`
+# cannot even traverse it and reports "no tunnel" on a fully configured gateway.
+#
+# And the three outcomes are kept distinct. A bare `if on_gw "sudo test -f ..."`
+# treats a broken sudo, a failed ssh and a genuinely absent config identically:
+# it quietly drops to the Phase 1 contract, which a Phase 2 gateway whose tunnel
+# is DEAD passes with flying colours -- ending in "all checks passed. The
+# workstation is provably isolated." on a lab with no working anonymity layer.
+phase_probe="$(on_gw "sudo -n true >/dev/null 2>&1 || { echo NOSUDO; exit 0; }
+if sudo -n test -f /etc/wireguard/wg0.conf; then echo TUNNEL; else echo NOTUNNEL; fi" 2>/dev/null | tr -d '\r' || true)"
+case "$phase_probe" in
+  TUNNEL)
+    PHASE=2
+    log "Tunnel configured on the gateway: verifying the Phase 2 contract" ;;
+  NOTUNNEL)
+    PHASE=1
+    log "No tunnel on the gateway: verifying the Phase 1 contract (zero egress)" ;;
+  NOSUDO)
+    die "passwordless sudo does not work on the gateway; cannot tell which contract applies" ;;
+  *)
+    die "could not reach the gateway on 127.0.0.1:${gw_port}; refusing to guess which contract applies" ;;
+esac
 
 if [[ "$PHASE" == "2" ]]; then
+  # `|| true` on every capture in this script is not sloppiness: lib.sh sets
+  # `set -euo pipefail`, which this file inherits, so an unguarded `x="$(cmd)"`
+  # aborts the whole run the moment cmd returns non-zero -- and several of the
+  # commands below return non-zero in the PASSING case (`timeout` exits 124 when
+  # the WAN stays silent). Failures are handled explicitly instead.
+  #
   # The WAN NIC must come from the MAIN routing table. `ip route get` and
   # ansible_default_ipv4 both return wg0 once the tunnel is up, because wg-quick
   # installs policy routing rules that outrank the main table -- and a WAN-silence
   # check pointed at wg0 would watch the tunnel instead of the wire.
-  # `|| true` on every capture in this script is not sloppiness: lib.sh sets
-  # `set -euo pipefail`, which this file inherits, so an unguarded `x="$(cmd)"`
-  # aborts the whole run the moment cmd returns non-zero -- and several of the
-  # commands below return non-zero in the PASSING case. Failures are handled
-  # explicitly instead, right where they happen.
   wan_if="$(on_gw "ip -4 route show table main default | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1" 2>/dev/null | tr -d '\r' || true)"
-  endpoint="$(on_gw "sudo sed -n 's/^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*//p' /etc/wireguard/wg0.conf | head -1" 2>/dev/null | tr -d '\r' || true)"
-  endpoint_ip="${endpoint%%:*}"
-  endpoint_port="${endpoint##*:}"
+  [[ -n "$wan_if" ]] || die "could not determine the gateway's WAN interface; refusing to report a clean WAN"
+
+  wan_addr="$(on_gw "ip -4 -o addr show dev ${wan_if} | awk '{print \$4}' | cut -d/ -f1 | head -1" 2>/dev/null | tr -d '\r' || true)"
+  [[ -n "$wan_addr" ]] || die "could not determine the gateway's WAN address; refusing to report a clean WAN"
+
   # The internal NIC, found by the address it carries rather than by name, is
   # where the kill-switch test confirms its own traffic generator is working.
   internal_if="$(on_gw "ip -4 -o addr show to ${gw_ip}/32 | awk '{print \$2}' | head -1" 2>/dev/null | tr -d '\r' || true)"
-  [[ -n "$wan_if" ]] || die "could not determine the gateway's WAN interface; refusing to report a clean WAN"
   [[ -n "$internal_if" ]] || die "could not determine the gateway's internal interface (no NIC holds ${gw_ip})"
+
+  endpoint="$(on_gw "sudo sed -n 's/^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*//p' /etc/wireguard/wg0.conf | head -1" 2>/dev/null | tr -d '\r' || true)"
+  endpoint_ip="${endpoint%%:*}"
+  endpoint_port="${endpoint##*:}"
   [[ -n "$endpoint_ip" && -n "$endpoint_port" ]] \
     || die "could not read the WireGuard endpoint from the gateway; refusing to report a clean WAN"
-  log "Gateway WAN is ${wan_if}; the only permitted flow on it is ${endpoint_ip}:${endpoint_port}"
+
+  # What is allowed to appear on the WAN, and nothing else:
+  #   - ARP, which is link-local and carries nothing.
+  #   - management SSH, scoped to tcp AND to this NIC's own address, so a leak
+  #     that merely happens to involve port 22 elsewhere is still caught.
+  #   - the single WireGuard endpoint.
+  #
+  # Exclusion, never inclusion. Filtering FOR the workstation's address is a false
+  # pass: the source of a leaked packet is not something this test may assume. A
+  # stale NAT binding makes it the gateway's SNATed tunnel address (seen while
+  # building Task 4); with the binding gone it is a bare 10.20.0.10 (seen by
+  # deliberately opening the forward path to prove this check fires at all).
+  wan_filter="not arp and not (tcp port 22 and host ${wan_addr}) and not (host ${endpoint_ip} and udp port ${endpoint_port})"
+  wan_cap_file="/tmp/anon-egress-wan-capture"
+
+  log "Gateway WAN is ${wan_if} (${wan_addr}); the only permitted flow on it is ${endpoint_ip}:${endpoint_port}"
 fi
+
+# --- WAN capture -------------------------------------------------------------
+#
+# Watching the WAN NIC is the only authoritative answer to "did a packet leave in
+# the clear". Asking the guest whether it got a reply is NOT equivalent, and the
+# difference is not academic: a forward-chain regression sends the workstation's
+# packets out the WAN un-SNATed, with source 10.20.0.10, for which SLIRP has no
+# return path -- so no reply ever comes back, the guest's probe fails, and a
+# reply-based check calls that "blocked" while traffic is leaving the machine.
+#
+# Runs in the background so a whole block of probes can be judged by one capture.
+# -l keeps tcpdump line-buffered; without it output to a pipe or file is block
+# buffered and a leak of a few packets can sit in the buffer, unflushed, until
+# after the capture is read -- silently becoming a clean result.
+wan_capture_start() {
+  local started
+  started="$(on_gw "sudo rm -f ${wan_cap_file} 2>/dev/null
+sudo nohup timeout 120 tcpdump -nnl -i ${wan_if} -Q out '${wan_filter}' >${wan_cap_file} 2>/dev/null </dev/null &
+sleep 2
+if pgrep -x tcpdump >/dev/null 2>&1; then echo STARTED; else echo NOTSTARTED; fi" 2>/dev/null | tr -d '\r' || true)"
+  # A capture that never started would report a beautifully clean WAN. Say so.
+  [[ "$started" == "STARTED" ]] || { note_fail "could not start the WAN capture on ${wan_if} (${started:-no response}); WAN silence CANNOT be asserted"; return 1; }
+  return 0
+}
+
+# Prints whatever left the WAN, one packet per line. Empty means silent.
+wan_capture_stop() {
+  on_gw "sudo pkill -x tcpdump >/dev/null 2>&1 || true
+sleep 1
+cat ${wan_cap_file} 2>/dev/null || true
+sudo rm -f ${wan_cap_file} 2>/dev/null || true" 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' || true
+}
 
 # --- per-VM checks -----------------------------------------------------------
 
@@ -174,16 +288,15 @@ while read -r short role vm_idx; do
   log "Verifying ${short} (${ip}) through the gateway on 127.0.0.1:${gw_port}"
 
   # 1. Reachability: the internal segment works and the jump path is intact.
-  if on_ws "$ip" "ping -c1 -W2 ${gw_ip} >/dev/null 2>&1"; then
-    ok "${short} reaches the gateway at ${gw_ip} on the internal segment"
-  else
-    note_fail "${short} cannot reach the gateway at ${gw_ip}"
-  fi
+  expect_reached "$(ws_probe "$ip" "ping -c1 -W2 ${gw_ip} >/dev/null 2>&1")" \
+    "${short} reaches the gateway at ${gw_ip} on the internal segment" \
+    "${short} cannot reach the gateway at ${gw_ip}" \
+    "gateway-reachability"
 
   # 2. Topology: exactly one non-loopback NIC. A second NIC appearing here means
   # someone gave this VM a NAT interface, which breaks the entire guarantee even
   # if every other check happens to pass at this moment. True in both phases.
-  nics="$(on_ws "$ip" "ls /sys/class/net | grep -v '^lo$' | tr '\n' ' '" || true)"
+  nics="$(on_ws "$ip" "ls /sys/class/net | grep -v '^lo$' | tr '\n' ' '" 2>/dev/null || true)"
   count="$(printf '%s' "$nics" | wc -w | tr -d ' ')"
   if [[ "$count" == "1" ]]; then
     ok "${short} has exactly one NIC (${nics% })"
@@ -191,37 +304,45 @@ while read -r short role vm_idx; do
     note_fail "${short} has ${count} NICs (${nics% }); an internal-only VM must have exactly one"
   fi
 
-  if [[ "$PHASE" == "1" ]]; then
-    # 3. Isolation: no path off the segment. ICMP to a public address, then a TCP
-    # connect, because a dropped ping alone would not rule out a working route.
-    if on_ws "$ip" "ping -c1 -W3 1.1.1.1 >/dev/null 2>&1"; then
-      note_fail "LEAK: ${short} reached 1.1.1.1 by ICMP with no VPN or forwarding in place"
-    else
-      ok "${short} has no ICMP path to the internet (correct for Phase 1)"
-    fi
+  # 3. Positive controls for the tools the leak checks rely on. A bash built
+  # without /dev/tcp, or a ping that cannot do IPv6, fails a probe in exactly the
+  # same way a blocked packet does -- which would make the corresponding leak
+  # check permanently, silently green.
+  expect_reached "$(ws_probe "$ip" "timeout 5 bash -c '</dev/tcp/${gw_ip}/22' >/dev/null 2>&1")" \
+    "${short} has working /dev/tcp (the TCP leak probes below are meaningful)" \
+    "${short} cannot open /dev/tcp even to the gateway: the TCP leak probes prove nothing" \
+    "dev-tcp control"
+  expect_reached "$(ws_probe "$ip" "ping -6 -c1 -W2 ::1 >/dev/null 2>&1")" \
+    "${short} has working IPv6 tooling (the v6 leak probe below is meaningful)" \
+    "${short} cannot ping -6 even to ::1: the IPv6 leak probe proves nothing" \
+    "ping6 control"
 
-    # /dev/tcp is a bash builtin, so this needs nothing installed on the guest.
-    if on_ws "$ip" "timeout 5 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1"; then
-      note_fail "LEAK: ${short} opened a TCP connection to 1.1.1.1:443"
-    else
-      ok "${short} has no TCP path to the internet (correct for Phase 1)"
-    fi
+  if [[ "$PHASE" == "1" ]]; then
+    # 4. Isolation: no path off the segment. ICMP to a public address, then a TCP
+    # connect, because a dropped ping alone would not rule out a working route.
+    expect_blocked "$(ws_probe "$ip" "ping -c1 -W3 1.1.1.1 >/dev/null 2>&1")" \
+      "${short} has no ICMP path to the internet (correct for Phase 1)" \
+      "LEAK: ${short} reached 1.1.1.1 by ICMP with no VPN or forwarding in place" \
+      "phase-1 ICMP"
+    expect_blocked "$(ws_probe "$ip" "timeout 5 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1")" \
+      "${short} has no TCP path to the internet (correct for Phase 1)" \
+      "LEAK: ${short} opened a TCP connection to 1.1.1.1:443" \
+      "phase-1 TCP"
     continue
   fi
 
   # --- Phase 2: egress must work, and only through the tunnel ----------------
-  if on_ws "$ip" "timeout 20 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1"; then
-    ok "${short} reaches the internet (through the tunnel)"
-  else
-    note_fail "${short} has no egress at all: the tunnel is not forwarding"
-  fi
+  expect_reached "$(ws_probe "$ip" "timeout 20 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1")" \
+    "${short} reaches the internet (through the tunnel)" \
+    "${short} has no egress at all: the tunnel is not forwarding" \
+    "phase-2 egress"
 
   # The authoritative exit check: Mullvad's own endpoint, asked FROM the
   # workstation. Anything less is inference.
   exit_json="$(py_on_ws "$ip" "$(mullvad_check_probe)" 2>/dev/null || true)"
-  ws_pub_ip="$(sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$exit_json")"
+  ws_pub_ip="$(sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$exit_json" || true)"
   if grep -q '"mullvad_exit_ip"[[:space:]]*:[[:space:]]*true' <<<"$exit_json"; then
-    exit_host="$(sed -n 's/.*"mullvad_exit_ip_hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$exit_json")"
+    exit_host="$(sed -n 's/.*"mullvad_exit_ip_hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$exit_json" || true)"
     ok "${short} egresses via a Mullvad exit (${ws_pub_ip}${exit_host:+, ${exit_host}})"
   else
     note_fail "${short} is NOT exiting via Mullvad. Response: ${exit_json:-<none>}"
@@ -236,37 +357,43 @@ while read -r short role vm_idx; do
   fi
 
   # DNS must work via the gateway's unbound, and NOT via any external resolver.
-  if on_ws "$ip" "getent hosts example.com >/dev/null 2>&1"; then
-    ok "${short} resolves DNS through the gateway"
-  else
-    note_fail "${short} cannot resolve DNS via ${gw_ip}"
-  fi
+  # The name is a fresh random one: `getent hosts example.com` would be answered
+  # from the workstation's own stub cache and would report a working resolver
+  # over a completely dead gateway.
+  up_rcode="$(py_on_ws "$ip" "$(dns_udp_probe "$gw_ip" "$(uncached_name)" 10)" 2>/dev/null | tr -d '\r' || true)"
+  case "$up_rcode" in
+    NOERROR|NXDOMAIN) ok "${short} resolves DNS through the gateway (uncached lookup, ${up_rcode})" ;;
+    "")               note_fail "the DNS probe against ${gw_ip} did not run on ${short}; status UNKNOWN" ;;
+    *)                note_fail "${short} cannot resolve via ${gw_ip}: an uncached lookup returned ${up_rcode}" ;;
+  esac
+
   dns_leak=0
   for resolver in 1.1.1.1 8.8.8.8; do
     rcode="$(py_on_ws "$ip" "$(dns_udp_probe "$resolver")" 2>/dev/null | tr -d '\r' || true)"
     if [[ -z "$rcode" ]]; then
       # Not a pass. A probe that failed to run produces the same silence as a
       # blocked one, and silence must never be scored as security.
-      note_fail "could not run the UDP DNS probe against ${resolver} on ${short}; leak status unknown"
+      note_fail "could not run the UDP DNS probe against ${resolver} on ${short}; leak status UNKNOWN"
       dns_leak=1
     elif [[ "$rcode" != "TIMEOUT" ]]; then
       note_fail "DNS LEAK: ${short} got a UDP :53 ${rcode} from ${resolver}, bypassing unbound"
       dns_leak=1
     fi
-    if on_ws "$ip" "timeout 5 bash -c '</dev/tcp/${resolver}/53' >/dev/null 2>&1"; then
-      note_fail "DNS LEAK: ${short} opened TCP :53 to ${resolver}, bypassing unbound"
-      dns_leak=1
-    fi
+    tcp53="$(ws_probe "$ip" "timeout 5 bash -c '</dev/tcp/${resolver}/53' >/dev/null 2>&1")"
+    case "$tcp53" in
+      REACHED) note_fail "DNS LEAK: ${short} opened TCP :53 to ${resolver}, bypassing unbound"; dns_leak=1 ;;
+      BLOCKED) ;;
+      *)       note_fail "the TCP :53 probe against ${resolver} did not run on ${short}; leak status UNKNOWN"; dns_leak=1 ;;
+    esac
   done
   [[ "$dns_leak" -eq 0 ]] && ok "${short} cannot reach an external resolver on UDP or TCP :53"
 
   # IPv6 must be dead, not tunnelled. `ping -6` rather than `ping6`, which is a
   # compatibility symlink that not every image still ships.
-  if on_ws "$ip" "ping -6 -c1 -W3 2606:4700:4700::1111 >/dev/null 2>&1"; then
-    note_fail "IPv6 LEAK: ${short} reached a v6 address"
-  else
-    ok "${short} has no IPv6 egress"
-  fi
+  expect_blocked "$(ws_probe "$ip" "ping -6 -c1 -W3 2606:4700:4700::1111 >/dev/null 2>&1")" \
+    "${short} has no IPv6 egress" \
+    "IPv6 LEAK: ${short} reached a v6 address" \
+    "IPv6"
 done <<<"$internal_rows"
 
 # --- the active kill-switch test ---------------------------------------------
@@ -280,26 +407,43 @@ if [[ "$PHASE" == "2" ]]; then
   # leaves the lab without egress is worse than one that fails.
   tunnel_restored=0
   restore_tunnel() {
-    [[ "$tunnel_restored" == "1" ]] && return 0
+    if [[ "$tunnel_restored" == "1" ]]; then return 0; fi
     log "Restoring the tunnel"
-    on_gw "sudo systemctl start wg-quick@wg0" >/dev/null 2>&1 || true
+    on_gw "sudo pkill -x tcpdump >/dev/null 2>&1 || true; sudo rm -f ${wan_cap_file} 2>/dev/null || true" >/dev/null 2>&1 || true
+    on_ws "$ks_ip" "pkill -x ping >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    # Do not swallow a failed restart: an operator who is told "Restoring the
+    # tunnel" and nothing else will assume the lab is usable again.
+    if ! on_gw "sudo systemctl start wg-quick@wg0" >/dev/null 2>&1; then
+      warn "could not restart wg-quick@wg0; the lab may be left without egress. Run: make ssh gateway, then sudo systemctl start wg-quick@wg0"
+    fi
   }
-  trap restore_tunnel EXIT INT TERM
+  # INT/TERM/HUP must EXIT after restoring. A bare handler returns and bash
+  # resumes the script -- straight into the tunnel-down assertions with the
+  # tunnel back up, reporting leaks that are nothing but the interrupt.
+  trap restore_tunnel EXIT
+  trap 'restore_tunnel; exit 130' INT TERM HUP
 
   # --- part 1: nothing NEW may escape while the tunnel is down ---------------
+  #
+  # Judged by the WAN NIC as well as by the guests' own results. The guests can
+  # only report whether a reply came back, and the un-SNATed leak described above
+  # produces no reply at all -- so on its own that evidence is compatible with
+  # traffic pouring out the WAN.
+  wan_watching=0
+  wan_capture_start && wan_watching=1
+
   on_gw "sudo systemctl stop wg-quick@wg0" >/dev/null 2>&1 \
     || die "could not stop the tunnel; kill-switch untested"
 
-  if on_ws "$ks_ip" "ping -c1 -W3 1.1.1.1 >/dev/null 2>&1"; then
-    note_fail "KILL-SWITCH FAILED: ICMP escaped with the tunnel down"
-  else
-    ok "kill-switch: no ICMP with the tunnel down"
-  fi
-  if on_ws "$ks_ip" "timeout 5 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1"; then
-    note_fail "KILL-SWITCH FAILED: TCP escaped with the tunnel down"
-  else
-    ok "kill-switch: no TCP with the tunnel down"
-  fi
+  expect_blocked "$(ws_probe "$ks_ip" "ping -c1 -W3 1.1.1.1 >/dev/null 2>&1")" \
+    "kill-switch: no ICMP with the tunnel down" \
+    "KILL-SWITCH FAILED: ICMP escaped with the tunnel down" \
+    "kill-switch ICMP"
+  expect_blocked "$(ws_probe "$ks_ip" "timeout 5 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1")" \
+    "kill-switch: no TCP with the tunnel down" \
+    "KILL-SWITCH FAILED: TCP escaped with the tunnel down" \
+    "kill-switch TCP"
+
   # Ask the gateway's own resolver for a name nothing can have cached, and read
   # the response code. With the tunnel down unbound cannot reach its upstream, so
   # the only honest answers are SERVFAIL or silence; anything resolvable means a
@@ -310,16 +454,26 @@ if [[ "$PHASE" == "2" ]]; then
     SERVFAIL|TIMEOUT|REFUSED)
       ok "kill-switch: no DNS with the tunnel down (${ks_rcode})" ;;
     "")
-      note_fail "could not run the DNS probe with the tunnel down; kill-switch DNS status unknown" ;;
+      note_fail "could not run the DNS probe with the tunnel down; kill-switch DNS status UNKNOWN" ;;
     *)
       note_fail "KILL-SWITCH FAILED: DNS still resolved with the tunnel down (${ks_rcode} for an uncached name)" ;;
   esac
+
   # The gateway itself must be just as closed. It is the host holding the
   # credentials, so a clear-net path here is the more valuable one to an attacker.
-  if on_gw "timeout 5 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1"; then
-    note_fail "KILL-SWITCH FAILED: the gateway itself reached the internet with the tunnel down"
-  else
-    ok "kill-switch: the gateway has no clear-net egress either"
+  expect_blocked "$(gw_probe "timeout 5 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1")" \
+    "kill-switch: the gateway has no clear-net egress either" \
+    "KILL-SWITCH FAILED: the gateway itself reached the internet with the tunnel down" \
+    "gateway clear-net"
+
+  if [[ "$wan_watching" == "1" ]]; then
+    leaked="$(wan_capture_stop)"
+    if [[ -n "$leaked" ]]; then
+      note_fail "KILL-SWITCH FAILED: traffic left ${wan_if} while the tunnel was down:"
+      printf '       %s\n' "$leaked" >&2
+    else
+      ok "kill-switch: ${wan_if} stayed silent throughout the tunnel-down probes"
+    fi
   fi
 
   # --- part 2: nor may an ALREADY ESTABLISHED flow ---------------------------
@@ -339,11 +493,12 @@ if [[ "$PHASE" == "2" ]]; then
 
   flow_up=0
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if on_ws "$ks_ip" "timeout 10 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1"; then
+    if [[ "$(ws_probe "$ks_ip" "timeout 10 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1")" == "REACHED" ]]; then
       flow_up=1; break
     fi
     sleep 3
   done
+
   if [[ "$flow_up" != "1" ]]; then
     note_fail "could not re-establish egress, so the established-flow leak test could not run"
   else
@@ -367,75 +522,44 @@ if [[ "$PHASE" == "2" ]]; then
     # silent WAN. Without this the test cannot tell "nothing leaked" from
     # "nothing was sent" -- and the second one looks identical and always passes.
     # That is not hypothetical: the TCP generator described above failed exactly
-    # this way, and the check below reported a clean WAN with a deliberately
-    # wide-open forward rule in place.
-    gen="$(on_gw "sudo timeout 8 tcpdump -nni ${internal_if} -c 2 'icmp and src host ${ks_ip}' 2>/dev/null | wc -l" 2>/dev/null | tr -d ' \r' || true)"
+    # this way, and the WAN check reported silence with a deliberately wide-open
+    # forward rule in place.
+    gen="$(on_gw "sudo timeout 8 tcpdump -nnl -i ${internal_if} -c 1 'icmp and src host ${ks_ip}' 2>/dev/null | wc -l" 2>/dev/null | tr -d ' \r' || true)"
     if [[ "${gen:-0}" == "0" ]]; then
       note_fail "the established-flow generator produced no traffic; a silent WAN would prove nothing"
     else
-      on_gw "sudo systemctl stop wg-quick@wg0" >/dev/null 2>&1 || true
-
-      # DO NOT filter on the workstation's address. The source address of a leaked
-      # packet is not something this test may assume: with a stale NAT binding
-      # still applied it carries the gateway's SNATed tunnel source (observed while
-      # building Task 4), and with the binding gone it carries a bare 10.20.0.10
-      # (observed by deliberately opening the forward path to prove this check
-      # fires at all). A filter naming either address is a false pass in the one
-      # test that must never give one.
-      #
-      # So filter by EXCLUDING what is legitimately allowed -- ARP, management SSH,
-      # and the single WireGuard endpoint -- and treat anything else on the WAN as
-      # a leak. Verified both ways: silent with the ruleset intact, and capturing
-      # the leak within a second with a permissive forward rule inserted.
-      #
-      # -Q out because tcpdump sees BOTH directions. Inbound packets are not a
-      # leak -- SLIRP router advertisements and stray replies arrive on this NIC
-      # whatever the tunnel is doing -- and counting them fails the test for
-      # traffic the gateway never sent.
-      #
-      # The captured lines are kept and reported. "Something left the WAN" with no
-      # packet attached is not a finding anyone can act on, and this test's whole
-      # job is to be believed when it fires.
-      #
-      # The exit status is carried back in a sentinel line rather than inferred.
-      # tcpdump exits 124 here in the PASSING case (timeout kills it because the
-      # WAN stayed silent) and 0 in the FAILING case (it hit its packet count), so
-      # the status alone is not usable -- and a missing tcpdump, or a sudo refusal,
-      # would produce the same empty output as a clean WAN. Reporting "no leak"
-      # because the probe never ran is the one failure mode this test cannot have.
-      cap="$(on_gw "command -v tcpdump >/dev/null 2>&1 || { echo __probe=missing; exit 0; }
-  sudo timeout 12 tcpdump -nni ${wan_if} -Q out -c 3 'not arp and not port 22 and not (host ${endpoint_ip} and udp port ${endpoint_port})' 2>/dev/null
-  echo __probe=\$?" 2>/dev/null | tr -d '\r' || true)"
-      probe_rc="$(sed -n 's/^__probe=//p' <<<"$cap" || true)"
-      leaked="$(grep -v '^__probe=' <<<"$cap" | sed '/^[[:space:]]*$/d' || true)"
-      case "$probe_rc" in
-        missing)
-          note_fail "tcpdump is not installed on the gateway: the WAN-silence check could not run" ;;
-        0|124)
-          if [[ -n "$leaked" ]]; then
-            note_fail "KILL-SWITCH FAILED: traffic left on ${wan_if} after the tunnel dropped (established-flow leak):"
-            printf '       %s\n' "$leaked" >&2
-          else
-            ok "kill-switch: an established flow does not survive the tunnel dropping"
-          fi ;;
-        *)
-          note_fail "the WAN-silence probe on ${wan_if} did not run (tcpdump exit ${probe_rc:-unknown}); leak status unknown" ;;
-      esac
+      if wan_capture_start; then
+        on_gw "sudo systemctl stop wg-quick@wg0" >/dev/null 2>&1 || true
+        # Long enough for several retransmits and ~30 ping packets to have had
+        # every opportunity to escape.
+        sleep 10
+        leaked="$(wan_capture_stop)"
+        if [[ -n "$leaked" ]]; then
+          note_fail "KILL-SWITCH FAILED: traffic left ${wan_if} after the tunnel dropped (established-flow leak):"
+          printf '       %s\n' "$leaked" >&2
+        else
+          ok "kill-switch: an established flow does not survive the tunnel dropping"
+        fi
+      fi
     fi
-    # Stop the generator. -w 60 would eventually do it anyway, but leaving a
-    # ping running would keep pushing packets through every later check.
-    on_ws "$ks_ip" "pkill -f 'ping -i 0.3 -w 60 -q 1.1.1.1' >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    # Stop the generator. `-x ping` matches the process name exactly; `-f` with a
+    # command-line pattern would also match the remote `bash -c` running it, since
+    # ssh puts the whole command string in that process's argv -- killing the
+    # shell first can leave the ping alive to pollute every later check.
+    on_ws "$ks_ip" "pkill -x ping >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
   fi
 
   # --- part 3: the lab must be left working ---------------------------------
   log "Kill-switch test: bringing the tunnel back up"
-  on_gw "sudo systemctl start wg-quick@wg0" >/dev/null 2>&1 || true
+  if ! on_gw "sudo systemctl start wg-quick@wg0" >/dev/null 2>&1; then
+    note_fail "could not restart wg-quick@wg0 after the kill-switch test"
+  fi
   tunnel_restored=1
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM HUP
 
   recovered=0
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if on_ws "$ks_ip" "timeout 10 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1"; then
+    if [[ "$(ws_probe "$ks_ip" "timeout 10 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1")" == "REACHED" ]]; then
       recovered=1; break
     fi
     sleep 3
@@ -450,24 +574,24 @@ if [[ "$PHASE" == "2" ]]; then
   # Rebooting the gateway inside verify would be slow and would cut the very SSH
   # path the rest of this script needs, so assert the ordering that makes a boot
   # safe instead.
-  if on_gw "systemctl show wg-quick@wg0 -p After --value | tr ' ' '\n' | grep -qx nftables.service"; then
-    ok "wg-quick is ordered after nftables (fail-closed across a reboot)"
-  else
-    note_fail "wg-quick is NOT ordered after nftables: a boot could route before the ruleset loads"
-  fi
-  if on_gw "systemctl is-enabled nftables >/dev/null 2>&1"; then
-    ok "nftables is enabled at boot"
-  else
-    note_fail "nftables is not enabled at boot"
-  fi
+  expect_reached "$(gw_probe "systemctl show wg-quick@wg0 -p After --value | tr ' ' '\n' | grep -qx nftables.service")" \
+    "wg-quick is ordered after nftables (fail-closed across a reboot)" \
+    "wg-quick is NOT ordered after nftables: a boot could route before the ruleset loads" \
+    "unit ordering"
+  expect_reached "$(gw_probe "systemctl is-enabled nftables >/dev/null 2>&1")" \
+    "nftables is enabled at boot" \
+    "nftables is not enabled at boot" \
+    "nftables enablement"
+
   # Forwarding must be a consequence of the ruleset being loaded, never a
   # persistent sysctl: with no ruleset the kernel default is accept, so a
   # forwarding kernel and no rules is the one combination that leaks everything.
-  if on_gw "grep -qs '^net.ipv4.ip_forward *= *1' /etc/sysctl.d/*.conf /etc/sysctl.conf"; then
-    note_fail "ip_forward is persistently enabled on disk: a boot with no ruleset would forward in the clear"
-  else
-    ok "ip_forward is not persistently enabled (granted by nftables.service only)"
-  fi
+  # All of systemd's sysctl search paths, not just /etc -- a drop-in under
+  # /usr/lib or /run enables forwarding just as effectively.
+  expect_blocked "$(gw_probe "grep -qs '^[[:space:]]*net.ipv4.ip_forward[[:space:]]*=[[:space:]]*1' /etc/sysctl.conf /etc/sysctl.d/*.conf /run/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf /lib/sysctl.d/*.conf")" \
+    "ip_forward is not persistently enabled (granted by nftables.service only)" \
+    "ip_forward is persistently enabled on disk: a boot with no ruleset would forward in the clear" \
+    "persistent ip_forward"
 fi
 
 echo
