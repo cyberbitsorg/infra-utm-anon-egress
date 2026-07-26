@@ -59,6 +59,33 @@ got_nocfg="$(MULLVAD_WG_CONFIG="" render_secret_vars)"
 [[ "$(yaml_value "$got_nocfg" mullvad_wg_config)" == "<<MISSING>>" ]] \
   || note "an empty MULLVAD_WG_CONFIG must not be emitted"
 
+echo "vars_or_empty_mapping:"
+
+# The actual regression: ansible-playbook must ACCEPT the file produced for a
+# fully-empty render, not merely "is valid YAML" -- a blank/whitespace-only
+# file is rejected outright even though it parses fine as empty YAML.
+got_blank="$(vars_or_empty_mapping "$got_empty")"
+[[ "$(printf '%s' "$got_blank" | tr -d '[:space:]')" == "{}" ]] \
+  || note "a fully empty render must become an explicit empty mapping ('{}'), not blank output"
+
+# Non-blank content must pass through untouched -- this must not turn a real
+# vars document into '{}'.
+got_passthrough="$(vars_or_empty_mapping "$got")"
+[[ "$got_passthrough" == "$(printf '%s\n' "$got")" ]] \
+  || note "non-empty content must pass through vars_or_empty_mapping unchanged"
+
+if command -v ansible-playbook >/dev/null 2>&1; then
+  tmp_pb="$(mktemp)"
+  tmp_vars="$(mktemp)"
+  printf '%s\n' '---' '- hosts: localhost' '  gather_facts: false' '  connection: local' '  tasks: []' > "$tmp_pb"
+  vars_or_empty_mapping "$got_empty" > "$tmp_vars"
+  ansible_err="$(ansible-playbook "$tmp_pb" -e "@${tmp_vars}" 2>&1)" \
+    || note "ansible-playbook rejected the vars file produced for a fully-empty render: ${ansible_err}"
+  rm -f "$tmp_pb" "$tmp_vars"
+else
+  echo "  (ansible-playbook not on PATH; skipped the real-parser check)"
+fi
+
 if [[ "$fail" -eq 0 ]]; then
   echo "secret-vars: OK"
 else

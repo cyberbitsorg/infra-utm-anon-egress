@@ -13,22 +13,48 @@
          | selectattr('ipv4.address', 'equalto', internal_ip)
          | map(attribute='device') | list | first | default('') }}
 
-- name: Find the WAN NIC (the one with the default route)
+- name: Read the MAIN routing table's default route
+  # ansible_facts.default_ipv4 is derived from `ip route get 8.8.8.8`, which
+  # wg-quick's `AllowedIPs = 0.0.0.0/0` setup HIJACKS once the tunnel is up: it
+  # installs a fwmark rule plus `table main suppress_prefixlength 0`, so that
+  # lookup returns wg0, not the physical NIC, on every run after the first.
+  # The MAIN table's own default route is the one thing that policy routing
+  # does not rewrite, so read it directly with `ip route show table main`
+  # instead of trusting the fact. Confirmed on a live gateway with the tunnel
+  # already up: `ip route get 8.8.8.8` said `dev wg0`, `ip route show table
+  # main default` still said `dev enp0s1`.
+  ansible.builtin.command: ip -4 route show table main default
+  register: anon_main_default_route
+  changed_when: false
+
+- name: Find the WAN NIC (the physical interface with the MAIN table's default route)
+  # regex_search with a capture-group reference returns a ONE-ELEMENT LIST
+  # (empirically confirmed against this ansible-core, not just per the docs
+  # wording), or None on no match -- hence the list-then-first-then-default
+  # chain rather than treating the result as a plain scalar.
   ansible.builtin.set_fact:
-    anon_wan_if: "{{ ansible_facts.default_ipv4.interface | default('') }}"
+    anon_wan_if: >-
+      {{ (anon_main_default_route.stdout
+          | regex_search('dev (\S+)', '\1')
+          | default([], true) | first) | default('', true) }}
 
 - name: Fail if either interface could not be identified
   # Loudly, not silently: a wrong interface name produces a ruleset that passes
-  # inspection and permits egress on the wrong NIC.
+  # inspection and permits egress on the wrong NIC. anon_wan_if == wg_interface
+  # is called out explicitly (not just "the two differ") because that is the
+  # exact silent failure mode that bit us: wg0 is non-empty and different from
+  # anon_internal_if, so the weaker check used to pass right through it.
   ansible.builtin.assert:
     that:
       - anon_internal_if | length > 0
       - anon_wan_if | length > 0
       - anon_internal_if != anon_wan_if
+      - anon_wan_if != wg_interface
     fail_msg: >-
       Could not identify the NICs unambiguously (internal='{{ anon_internal_if }}',
       wan='{{ anon_wan_if }}'). Expected one interface holding {{ internal_ip }}
-      and a different one with the default route.
+      and a different, physical interface (never '{{ wg_interface }}') holding
+      the MAIN routing table's default route.
 
 - name: Install WireGuard
   # wireguard-tools only: no vendor daemon. Mullvad's app is amd64-only and would

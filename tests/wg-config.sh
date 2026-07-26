@@ -94,6 +94,22 @@ AllowedIPs = 0.0.0.0/0
 Endpoint = 1.2.3.4:3004 # note
 EOF
 
+# An operator-supplied MTU. wg-quick applies the LAST assignment of a repeated
+# key, so if this line survived sanitising, the gateway role's own MTU write
+# (below [Interface]) would come first and this one would silently win instead
+# -- the role would report the MTU it set, but the tunnel would run at
+# whatever Mullvad's generator emitted here.
+cat > "${tmp}/mtu.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = 10.66.12.34/32
+MTU = 1420
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 193.138.218.220:3004
+EOF
+
 # Mullvad's "local network sharing" option injects PostUp/PostDown/PreUp/PreDown
 # hooks that run firewall rules. wg-quick must never manage firewalling --
 # nftables owns egress -- so sanitize_wg_config must strip all four.
@@ -167,6 +183,11 @@ grep -qE '^Address = 10\.66\.1\.2/32,10\.77\.3\.4/32$' <<<"$san_first" \
 grep -qE '^AllowedIPs = 0\.0\.0\.0/0$' <<<"$san_first" \
   || note "AllowedIPs not cleanly rejoined after stripping a leading IPv6 entry"
 grep -qE ',,|= ,|,$' <<<"$san_first" && note "stray comma left in sanitized output"
+
+echo "sanitize_wg_config (operator MTU):"
+san_mtu="$(sanitize_wg_config "${tmp}/mtu.conf")"
+grep -qE '^MTU[[:space:]]*=' <<<"$san_mtu" \
+  && note "an operator-supplied MTU line must be stripped (the gateway role's wg_mtu must be the only source)"
 
 echo "sanitize_wg_config (Post/Pre hooks):"
 san_hooks="$(sanitize_wg_config "${tmp}/hooks.conf")"

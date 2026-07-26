@@ -94,6 +94,12 @@ validate_wg_config() {
 # Print the config with the modifications this design requires:
 #   - the `DNS =` line removed, so wg-quick does not touch resolv.conf; unbound
 #     owns DNS and wg-quick fighting it would break the gateway's resolution.
+#   - the `MTU =` line removed, so the Ansible role's wg_mtu default is the
+#     ONLY place that sets it. wg-quick applies the LAST assignment of a given
+#     key it sees in the file, so leaving the operator's MTU line in place
+#     would let it silently outrank the value the gateway role writes below
+#     `[Interface]` -- the role would report success while the tunnel actually
+#     ran at whatever MTU Mullvad's generator happened to emit.
 #   - `PostUp`/`PostDown`/`PreUp`/`PreDown` lines removed, so wg-quick never
 #     manages firewalling either: nftables owns egress, and Mullvad's "local
 #     network sharing" option injects exactly these hooks with rules that would
@@ -112,7 +118,7 @@ validate_wg_config() {
 sanitize_wg_config() {
   local file="${1:?config path required}" line key val stripped
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*(DNS|PostUp|PostDown|PreUp|PreDown)[[:space:]]*= ]]; then
+    if [[ "$line" =~ ^[[:space:]]*(DNS|MTU|PostUp|PostDown|PreUp|PreDown)[[:space:]]*= ]]; then
       continue
     fi
     if [[ "$line" =~ ^[[:space:]]*(Address|AllowedIPs)[[:space:]]*= ]]; then

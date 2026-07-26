@@ -113,6 +113,25 @@ render_secret_vars() {
   done
 }
 
+# Guarantee that a string destined for an `-e @file` vars document is one
+# ansible-playbook will actually accept. `render_secret_vars` (and up.sh's own
+# WireGuard block) both legitimately produce nothing when every secret is
+# unset -- that is valid, if empty, YAML -- but `ansible-playbook -e @file`
+# rejects a blank/whitespace-only file outright with "Invalid extra vars data
+# supplied ... could not be made into a dictionary". An operator who blanks
+# both console passwords and sets no MULLVAD_WG_CONFIG (the documented
+# "everything locked down" state) would otherwise hit that hard failure before
+# any task runs. Substitute an explicit empty mapping in that one case; any
+# non-blank content is passed through unchanged (plus a trailing newline).
+vars_or_empty_mapping() {
+  local content="${1:-}"
+  if [[ -z "$(printf '%s' "$content" | tr -d '[:space:]')" ]]; then
+    printf '{}\n'
+  else
+    printf '%s\n' "$content"
+  fi
+}
+
 # Generate a password: 24 chars from [A-Za-z0-9] (~142 bits). The charset is
 # restricted on purpose -- it is wide enough to be strong, and narrow enough that
 # the value can never trip a shell, a YAML parser or chpasswd on its way to the
