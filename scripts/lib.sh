@@ -201,7 +201,12 @@ internal_ip_for() {
 # by design -- 'make destroy && make up' hands the workstation a brand new host
 # key -- so pinning them would break on the next rebuild, and /dev/null keeps
 # that churn out of the operator's real known_hosts.
-SSH_HOSTKEY_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+#
+# LogLevel=ERROR is part of the same decision: discarding known_hosts means every
+# single connection prints "Warning: Permanently added ...". verify.sh makes
+# dozens of hops per run, and a leak FAIL buried in forty identical warnings is a
+# finding nobody reads. Errors and fatals still print.
+SSH_HOSTKEY_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
 # The ProxyCommand that reaches an internal-only VM through the gateway.
 # Usage: ssh -o ProxyCommand="$(ssh_jump_proxycommand "$gw_port")" ...

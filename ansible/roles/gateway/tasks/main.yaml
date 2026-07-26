@@ -12,6 +12,21 @@
     group: root
     mode: "0644"
 
+- name: Install tcpdump on the gateway
+  # scripts/verify.sh proves the kill-switch by watching the WAN NIC itself --
+  # the only place that can answer "did a packet actually leave in the clear".
+  # Without tcpdump that check cannot run, and a leak test that quietly degrades
+  # to "not tested" is the most dangerous kind of green.
+  #
+  # Installed here, early and ungated, so it is present in Phase 1 too: apt still
+  # has the cloud-init bootstrap resolver at this point, before the kill-switch
+  # ruleset cuts DNS off the WAN. Gateway only -- the workstation stays bare.
+  ansible.builtin.apt:
+    name: tcpdump
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
 - name: Keep persistent IPv4 forwarding OFF (nftables switches it on)
   # Deliberately 0, and deliberately not applied here. Forwarding is granted by
   # nftables.service's ExecStartPost once the kill-switch ruleset has actually
