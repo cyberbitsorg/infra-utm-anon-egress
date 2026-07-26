@@ -44,3 +44,12 @@
   ansible.builtin.include_tasks: wireguard.yaml
   when: mullvad_wg_sanitized | default('') | length > 0
   tags: [vpn, wireguard]
+
+# MUST come after the wireguard include: the ruleset template consumes the
+# anon_wan_if / anon_internal_if facts set there. Gated on the same condition --
+# a kill-switch whose only permitted egress is an endpoint that was never
+# configured would close the gateway with no way back out.
+- name: Configure the kill-switch
+  ansible.builtin.include_tasks: nftables.yaml
+  when: mullvad_wg_sanitized | default('') | length > 0
+  tags: [vpn, nftables, killswitch]

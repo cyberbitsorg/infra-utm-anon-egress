@@ -1,0 +1,100 @@
+---
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Deploy the kill-switch ruleset
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0755"
+    # Never install a ruleset nft cannot parse: that would either leave the old
+    # rules in place (silently stale) or, after a reboot, no rules at all.
+    validate: "/usr/sbin/nft -c -f %s"
+  notify: Reload nftables
+
+- name: Enable nftables at boot
+  # `state: started` also LOADS the ruleset on the first run, before the handler
+  # would: from this task onwards the gateway is closed. Nothing between here and
+  # the resolv.conf task below needs DNS or clear-net, so the gap is inert.
+  ansible.builtin.systemd_service:
+    name: nftables
+    enabled: true
+    state: started
+
+- name: Ensure the WireGuard unit drop-in directory exists
+  ansible.builtin.file:
+    path: "/etc/systemd/system/wg-quick@{{ wg_interface }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Order WireGuard after nftables
+  # THE fail-closed mechanism. Without this, systemd may start wg-quick first and
+  # a boot could route before the ruleset exists.
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/wg-quick@{{ wg_interface }}.service.d/10-after-nftables.conf"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role: gateway).
+      [Unit]
+      After=nftables.service
+      Wants=nftables.service
+  notify: Restart WireGuard
+
+- name: Enable WireGuard at boot
+  ansible.builtin.systemd_service:
+    name: "wg-quick@{{ wg_interface }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Point the gateway's resolver through the tunnel
+  # ORDERING, not cosmetics. Until now the gateway resolved via SLIRP's 10.0.2.3
+  # (the bootstrap path from Task 1). The ruleset above drops :53 on the WAN, so
+  # that path is gone the moment it loads -- and Task 5 still has to `apt install
+  # unbound`, which needs working DNS. Mullvad's resolver is reachable inside the
+  # tunnel and permitted by `oifname wg0 accept`, so it bridges the gap without
+  # ever leaking a query. Task 5 replaces this with 127.0.0.1 once unbound is up.
+  #
+  # With the tunnel down this leaves the gateway with no DNS at all. That is the
+  # fail-closed promise applied consistently, not a defect.
+  #
+  # `follow: false` (the module default, stated explicitly because it is
+  # load-bearing here) REPLACES the symlink the Debian cloud image ships at
+  # /etc/resolv.conf -> /run/systemd/resolve/resolv.conf with a real file. Were
+  # it true, this would instead write into systemd-resolved's runtime file, which
+  # resolved rewrites and a reboot discards. systemd's own tmpfiles entry for
+  # that symlink is `L!` (create-if-absent, boot-only), so it does not put the
+  # symlink back over a regular file.
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    mode: "0644"
+    follow: false
+    content: |
+      # Managed by Ansible (role: gateway).
+      # Mullvad's resolver, reachable only inside the WireGuard tunnel.
+      nameserver {{ mullvad_dns }}
+      options timeout:2 attempts:2
+
+- name: Stop cloud-init from rewriting resolv.conf
+  # A regenerated resolv.conf pointing back at 10.0.2.3 would not leak (the
+  # ruleset drops it) but it would silently break all gateway DNS on next boot.
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-anon-egress-no-resolv.cfg
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role: gateway).
+      manage_resolv_conf: false

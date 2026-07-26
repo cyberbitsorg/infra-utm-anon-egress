@@ -1,0 +1,93 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (role: gateway). Do not edit on the host.
+#
+# The fail-closed kill-switch. Three chains at policy drop, and exactly two ways
+# out: WireGuard-encrypted UDP to ONE endpoint, and anything already inside the
+# tunnel. Fail-closed comes from ORDERING, not from a hook: nftables.service loads
+# this before wg-quick, so a tunnel that never comes up leaves forwarding that was
+# never permitted. There is no window to miss.
+#
+# Every interface name below comes from a fact derived on the host (see
+# tasks/wireguard.yaml). Hardcoding enp0s1/enp0s2 would produce a ruleset that
+# reads correctly and leaks the day the kernel renames a NIC.
+
+flush ruleset
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    iif lo accept
+    ct state established,related accept
+
+    # Management SSH, INBOUND over the SLIRP host port forward. Not reachable from
+    # the internet and it cannot carry workstation traffic outward, so it is not a
+    # leak -- and it is the repair path when the tunnel is broken.
+    iifname "{{ anon_wan_if }}" tcp dport 22 accept
+
+    # The workstation: SSH (ProxyJump target), DNS to unbound, and ICMP so
+    # reachability checks work.
+    iifname "{{ anon_internal_if }}" tcp dport 22 accept
+    iifname "{{ anon_internal_if }}" udp dport 53 accept
+    iifname "{{ anon_internal_if }}" tcp dport 53 accept
+    iifname "{{ anon_internal_if }}" icmp type echo-request accept
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+
+    ct state established,related accept
+
+    # The ONLY forward path in this repo. internal -> WAN is not expressed at all;
+    # policy drop covers it. If wg0 does not exist, this rule matches nothing and
+    # the workstation has no egress -- which is the entire promise.
+    iifname "{{ anon_internal_if }}" oifname "{{ wg_interface }}" accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    oif lo accept
+    ct state established,related accept
+
+    # The single clear-net exception: the WireGuard handshake and data to ONE
+    # endpoint. Pinned to an IP, so no DNS is needed to bring the tunnel up.
+    oifname "{{ anon_wan_if }}" ip daddr {{ mullvad_endpoint_ip }} udp dport {{ mullvad_endpoint_port }} accept
+
+    # The gateway must be able to ORIGINATE one thing on the internal segment:
+    # a TCP connection to port 22. Ansible and scripts/ssh.sh reach the
+    # workstation with `ssh -W`, which makes sshd on THIS host open a brand-new
+    # connection out the internal NIC -- `ct state established` does not cover
+    # it, and without this rule policy drop cuts the workstation off from the
+    # control node entirely (the workstation play, `make verify` and
+    # `make ssh workstation` all fail). Not a leak: the segment is a host-only
+    # vmnet switch with no route to the host LAN or the internet, the rule faces
+    # inward, and the forward chain above still denies internal -> WAN. Kept to
+    # dport 22 rather than a blanket `oifname <internal> accept` because SSH is
+    # the only thing the gateway ever initiates inward -- unbound's replies, SSH
+    # replies and ICMP echo replies are all `established,related`.
+    oifname "{{ anon_internal_if }}" tcp dport 22 accept
+
+    # Everything else the gateway does goes through the tunnel, including apt and
+    # unbound's upstream queries. With the tunnel down the gateway cannot update
+    # either -- accepted deliberately: it is the anonymity layer, so a clear-net
+    # exception here would be a permanent leak path.
+    oifname "{{ wg_interface }}" accept
+  }
+}
+
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    # SNAT the workstation's traffic, but only as it leaves the tunnel.
+    oifname "{{ wg_interface }}" masquerade
+  }
+}
+
+# IPv6: dropped outright rather than tunnelled. Parent spec §6 allows either;
+# fully blocked has strictly less leak surface and nothing here needs v6.
+table ip6 filter {
+  chain input   { type filter hook input priority 0; policy drop; }
+  chain forward { type filter hook forward priority 0; policy drop; }
+  chain output  { type filter hook output priority 0; policy drop; }
+}
