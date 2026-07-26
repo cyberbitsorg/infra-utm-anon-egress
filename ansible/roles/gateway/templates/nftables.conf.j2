@@ -36,23 +36,61 @@ table inet filter {
   chain forward {
     type filter hook forward priority 0; policy drop;
 
-    ct state established,related accept
-
     # The ONLY forward path in this repo. internal -> WAN is not expressed at all;
     # policy drop covers it. If wg0 does not exist, this rule matches nothing and
     # the workstation has no egress -- which is the entire promise.
     iifname "{{ anon_internal_if }}" oifname "{{ wg_interface }}" accept
+
+    # Return traffic, and ONLY in the tunnel -> internal direction.
+    #
+    # This rule used to be an unqualified `ct state established,related accept`,
+    # which was a clear-net leak. conntrack keys on the IP 5-tuple, NOT on the
+    # output interface, so an entry created while the tunnel was up stays
+    # ESTABLISHED (timeout 432000s -- five days) after the tunnel goes away. If
+    # anything then routes those packets at the WAN NIC, an unqualified rule
+    # accepts them and the workstation's traffic leaves in clear-net.
+    #
+    # That is reachable, not theoretical: wg-quick's del_if() deletes the policy
+    # routing rules BEFORE it deletes the interface, so between those two steps
+    # wg0 still exists (conntrack not yet flushed by the masquerade device
+    # notifier) while the effective route is already `default dev {{ anon_wan_if }}`.
+    # Confirmed on this gateway with `nft monitor trace`: a workstation packet
+    # with `iif {{ anon_internal_if }} oif {{ anon_wan_if }}` matched the old rule
+    # and got `verdict accept` onto the clear-net NIC.
+    #
+    # Scoping to the return direction closes it by construction: the accept now
+    # requires `iifname {{ wg_interface }}`, and when the tunnel is gone no packet
+    # can carry that input interface. The forward direction is already covered by
+    # the explicit rule above, so nothing legitimate is lost.
+    iifname "{{ wg_interface }}" oifname "{{ anon_internal_if }}" ct state established,related accept
   }
 
   chain output {
     type filter hook output priority 0; policy drop;
 
     oif lo accept
-    ct state established,related accept
+
+    # NOTE: there is deliberately NO unqualified `ct state established,related
+    # accept` here. It would have the same defect as the one removed from the
+    # forward chain: conntrack does not key on the output interface, so a flow
+    # established through the tunnel stays ESTABLISHED for days after the tunnel
+    # dies and an unqualified rule would re-admit it on the clear-net NIC. That
+    # it happens not to leak today is an accident of the gateway's own sockets
+    # being bound to wg0's source address (which vanishes with the interface, so
+    # the route lookup fails before nftables is ever consulted). Accidents are
+    # not security properties, so every accept below names its interface.
 
     # The single clear-net exception: the WireGuard handshake and data to ONE
     # endpoint. Pinned to an IP, so no DNS is needed to bring the tunnel up.
+    # No state match: this rule intentionally covers the whole flow.
     oifname "{{ anon_wan_if }}" ip daddr {{ mullvad_endpoint_ip }} udp dport {{ mullvad_endpoint_port }} accept
+
+    # Replies to the INBOUND management SSH, and nothing else, on the WAN NIC.
+    # Scoped to source port 22 so an established flow can never carry anything
+    # else out in clear-net. Originating a new flow from source port 22 is
+    # root-only and would still need an inbound packet first, which no rule
+    # permits -- so this cannot be turned into an egress path.
+    oifname "{{ anon_wan_if }}" tcp sport 22 ct state established,related accept
 
     # The gateway must be able to ORIGINATE one thing on the internal segment:
     # a TCP connection to port 22. Ansible and scripts/ssh.sh reach the
@@ -67,6 +105,11 @@ table inet filter {
     # the only thing the gateway ever initiates inward -- unbound's replies, SSH
     # replies and ICMP echo replies are all `established,related`.
     oifname "{{ anon_internal_if }}" tcp dport 22 accept
+
+    # Replies to the workstation on the internal segment: unbound's DNS answers,
+    # sshd's answers, ICMP echo replies. Scoped to the internal NIC, which has no
+    # route off the host-only segment.
+    oifname "{{ anon_internal_if }}" ct state established,related accept
 
     # Everything else the gateway does goes through the tunnel, including apt and
     # unbound's upstream queries. With the tunnel down the gateway cannot update

@@ -38,6 +38,19 @@
 - name: Order WireGuard after nftables
   # THE fail-closed mechanism. Without this, systemd may start wg-quick first and
   # a boot could route before the ruleset exists.
+  #
+  # Requires=, not Wants=: Wants= is advisory, so if nftables.service ever failed
+  # (a hand-edited unparseable file, a missing /etc/nftables.conf) wg-quick would
+  # start anyway and the tunnel would come up with NO ruleset behind it.
+  # Requires= makes that combination impossible.
+  #
+  # This narrows the failure, it does not eliminate it: with nftables.service
+  # failed there is no ruleset at all, and the kernel's default is accept while
+  # net.ipv4.ip_forward stays 1. A failed nftables plus the WAN's default route
+  # is therefore still a fail-OPEN state whether or not wg-quick started. What
+  # actually keeps that from happening is `validate:` on the template task above,
+  # which makes an unparseable /etc/nftables.conf unable to land in the first
+  # place. See the report for the residual risk.
   ansible.builtin.copy:
     dest: "/etc/systemd/system/wg-quick@{{ wg_interface }}.service.d/10-after-nftables.conf"
     owner: root
@@ -47,7 +60,7 @@
       # Managed by Ansible (role: gateway).
       [Unit]
       After=nftables.service
-      Wants=nftables.service
+      Requires=nftables.service
   notify: Restart WireGuard
 
 - name: Enable WireGuard at boot
