@@ -36,6 +36,36 @@ AllowedIPs = 0.0.0.0/0
 Endpoint = se-mma-wg-001.relays.mullvad.net:3004
 EOF
 
+# Two peers. wg-quick would happily configure both, but the kill-switch allows
+# exactly ONE endpoint through, so the second is silently blackholed -- it fails
+# closed, and presents as a tunnel that mysteriously does not work.
+cat > "${tmp}/twopeers.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = 10.66.12.34/32
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 193.138.218.220:3004
+[Peer]
+PublicKey = J8KysHmHZWqtrVKKOppneDXSks/PDsB1XTlRHpwiABA=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 185.213.154.66:3225
+EOF
+
+# A bracketed IPv6 endpoint. Refused like any non-IPv4 endpoint, but it must say
+# WHY: the generic message claims "not a hostname", which is untrue here and
+# sends the operator hunting for the wrong problem.
+cat > "${tmp}/v6endpoint.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = 10.66.12.34/32
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = 0.0.0.0/0
+Endpoint = [2a03:1b20:5:f011::a01f]:3004
+EOF
+
 cat > "${tmp}/nokey.conf" <<'EOF'
 [Interface]
 Address = 10.66.12.34/32
@@ -141,6 +171,17 @@ fi
 if validate_wg_config "${tmp}/nokey.conf" 2>/dev/null; then
   note "a config with no PrivateKey must be refused"
 fi
+# The ruleset permits exactly one endpoint, so more than one [Peer] must be
+# caught here rather than turning into a tunnel that silently will not come up.
+if validate_wg_config "${tmp}/twopeers.conf" 2>/dev/null; then
+  note "a config with two [Peer] sections must be refused"
+fi
+if validate_wg_config "${tmp}/v6endpoint.conf" 2>/dev/null; then
+  note "a bracketed IPv6 endpoint must be refused"
+fi
+# ...and the reason must name IPv6, not send the operator looking for a hostname.
+grep -qi 'IPv6' <<<"$(validate_wg_config "${tmp}/v6endpoint.conf" 2>&1 || true)" \
+  || note "the IPv6-endpoint rejection must say IPv6, not 'not a hostname'"
 if validate_wg_config "${tmp}/does-not-exist.conf" 2>/dev/null; then
   note "a missing file must be refused"
 fi

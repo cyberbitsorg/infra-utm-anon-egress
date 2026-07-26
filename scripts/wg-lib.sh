@@ -58,8 +58,16 @@ wg_endpoint_port() {
 # stderr and return 1. Specific messages matter: this runs in preflight, and
 # "invalid config" would send the operator back to a website with no clue why.
 validate_wg_config() {
-  local file="${1:?config path required}" ip port addr allowed
+  local file="${1:?config path required}" ip port addr allowed peers
   [[ -f "$file" ]] || { echo "WireGuard config not found: ${file}" >&2; return 1; }
+  # Exactly one [Peer]. The whole design rests on there being ONE endpoint: the
+  # nftables output chain allows a single ip/port pair, and every helper here
+  # takes the first match. A second peer would be configured by wg-quick and then
+  # silently blackholed by the ruleset -- fails closed, but presents as "the
+  # tunnel just does not work" with nothing pointing at the cause.
+  peers="$(grep -c -i '^[[:space:]]*\[Peer\]' "$file" || true)"
+  [[ "${peers:-0}" -eq 1 ]] \
+    || { echo "${file}: found ${peers:-0} [Peer] sections, expected exactly 1. This design allows one endpoint through the kill-switch; extra peers would be blocked." >&2; return 1; }
   [[ -n "$(_wg_field "$file" PrivateKey)" ]] \
     || { echo "${file}: no PrivateKey. Generate a config (not just a key) on Mullvad's site." >&2; return 1; }
   [[ -n "$(_wg_field "$file" PublicKey)" ]] \
@@ -83,6 +91,11 @@ validate_wg_config() {
     || { echo "${file}: no Endpoint = <host>:<port> line." >&2; return 1; }
   [[ "$port" =~ ^[0-9]+$ ]] \
     || { echo "${file}: endpoint port '${port}' is not numeric." >&2; return 1; }
+  # A bracketed host is an IPv6 endpoint. Caught separately so the operator gets
+  # the actual reason: the generic message below says "not a hostname", which is
+  # simply untrue of `[2a03::1]:3225` and sends them looking for the wrong problem.
+  [[ "$ip" == \[* ]] \
+    && { echo "${file}: endpoint '${ip}' is IPv6. This design drops IPv6 outright; pick a server by its IPv4 address on Mullvad's servers page." >&2; return 1; }
   # An IPv4 literal only. A hostname would have to be resolved over clear-net DNS
   # before the tunnel exists -- a leak by construction, and a chicken-and-egg
   # dependency (design §2). Mullvad's generator emits IPs.

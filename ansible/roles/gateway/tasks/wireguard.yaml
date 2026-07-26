@@ -3,15 +3,23 @@
 # Hardcoding enp0s1/enp0s2 would be a ruleset that looks right and leaks the day
 # the kernel names them differently.
 - name: Find the internal NIC (the one holding the gateway's segment address)
+  # Kept as a LIST, not narrowed with `| first` here. If two interfaces somehow
+  # carried the segment address, `first` would pick one at fact-ordering's whim
+  # and produce a ruleset that names the wrong NIC -- which reads correctly and
+  # governs the wrong wire. The assert below rejects the ambiguity instead.
   ansible.builtin.set_fact:
-    anon_internal_if: >-
+    anon_internal_if_candidates: >-
       {{ ansible_facts.interfaces
          | map('regex_replace', '^', '')
          | select('ne', 'lo')
          | map('extract', ansible_facts)
          | selectattr('ipv4', 'defined')
          | selectattr('ipv4.address', 'equalto', internal_ip)
-         | map(attribute='device') | list | first | default('') }}
+         | map(attribute='device') | list }}
+
+- name: Name the internal NIC
+  ansible.builtin.set_fact:
+    anon_internal_if: "{{ anon_internal_if_candidates | first | default('', true) }}"
 
 - name: Read the MAIN routing table's default route
   # ansible_facts.default_ipv4 is derived from `ip route get 8.8.8.8`, which
@@ -28,15 +36,20 @@
   changed_when: false
 
 - name: Find the WAN NIC (the physical interface with the MAIN table's default route)
-  # regex_search with a capture-group reference returns a ONE-ELEMENT LIST
-  # (empirically confirmed against this ansible-core, not just per the docs
-  # wording), or None on no match -- hence the list-then-first-then-default
-  # chain rather than treating the result as a plain scalar.
+  # Deliberately NOT `regex_search('dev (\S+)', '\1')`. With a capture-group
+  # reference that filter returns a one-element LIST on this ansible-core, but
+  # the return shape has varied across versions and nothing here pins the
+  # version. If a future core returned a plain string instead, `| first` would
+  # quietly yield its first CHARACTER -- 'e' rather than 'enp0s1' -- and the
+  # assert below would happily pass it (non-empty, not the internal NIC, not
+  # wg0). The ruleset would then name an interface that does not exist. That
+  # fails closed rather than leaking, but it presents as an unexplainable dead
+  # tunnel. Matching the whole token and trimming the prefix returns a string on
+  # every version, so the shape cannot drift.
   ansible.builtin.set_fact:
     anon_wan_if: >-
-      {{ (anon_main_default_route.stdout
-          | regex_search('dev (\S+)', '\1')
-          | default([], true) | first) | default('', true) }}
+      {{ (anon_main_default_route.stdout | regex_search('dev \S+') | default('', true))
+         | regex_replace('^dev ', '') }}
 
 - name: Fail if either interface could not be identified
   # Loudly, not silently: a wrong interface name produces a ruleset that passes
@@ -46,15 +59,17 @@
   # anon_internal_if, so the weaker check used to pass right through it.
   ansible.builtin.assert:
     that:
+      - anon_internal_if_candidates | length == 1
       - anon_internal_if | length > 0
       - anon_wan_if | length > 0
       - anon_internal_if != anon_wan_if
       - anon_wan_if != wg_interface
     fail_msg: >-
-      Could not identify the NICs unambiguously (internal='{{ anon_internal_if }}',
-      wan='{{ anon_wan_if }}'). Expected one interface holding {{ internal_ip }}
-      and a different, physical interface (never '{{ wg_interface }}') holding
-      the MAIN routing table's default route.
+      Could not identify the NICs unambiguously (internal candidates=
+      {{ anon_internal_if_candidates }}, wan='{{ anon_wan_if }}'). Expected
+      EXACTLY ONE interface holding {{ internal_ip }} and a different, physical
+      interface (never '{{ wg_interface }}') holding the MAIN routing table's
+      default route.
 
 - name: Install WireGuard
   # wireguard-tools only: no vendor daemon. Mullvad's app is amd64-only and would
