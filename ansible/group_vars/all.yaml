@@ -1,0 +1,15 @@
+---
+timezone: Europe/Amsterdam
+
+# Packages installed on every host.
+common_packages:
+  - ca-certificates
+  - curl
+  - dnsutils
+  - git
+  - htop
+  - jq
+  - net-tools
+  - tmux
+  - tree
+  - vim

@@ -1,0 +1,99 @@
+# infra-utm-anon-egress configuration
+# Copy to lab.conf and adjust. lab.conf is gitignored.
+
+# --- Identity ---------------------------------------------------------------
+# Prefix for all VM names in UTM. Deliberately different from the redteam lab's
+# prefix so the two fleets can never collide in the same UTM instance.
+LAB_PREFIX="anon"
+
+# User created inside every VM (cloud-init). Ansible connects as this user.
+# Avoid a name that is already a system group in the guest: Debian and Kali
+# ship legacy groups like operator (GID 37), staff, games and users. The
+# cloud-init template handles the clash, but a free name keeps it simple.
+LAB_USER="anon"
+
+# Public SSH key injected into every VM. Generated automatically by
+# scripts/preflight.sh if the file does not exist.
+LAB_SSH_KEY="${HOME}/.ssh/id_ed25519_anon.pub"
+
+# --- Networking -------------------------------------------------------------
+# The NIC layout is per role and fixed by scripts/lib.sh (nic_layout_for_role)
+# plus scripts/create-vm.applescript. It is NOT configurable here, because the
+# whole security property of this repo depends on it:
+#
+#   gateway     dual     emulated NAT NIC (internet + the host SSH forward)
+#                        AND a host-mode NIC at GATEWAY_INTERNAL_IP.
+#   everything  internal ONLY a host-mode NIC on LAB_SEGMENT. No NAT NIC at
+#   else                 all, so it has no path to the internet except through
+#                        the gateway. Reached from the host by SSH ProxyJump
+#                        through the gateway, never by a direct port forward.
+#
+# The segment is a host-only Apple vmnet switch: no gateway, no route to the
+# host's LAN or the internet.
+LAB_SEGMENT="10.20.0.0/24"
+GATEWAY_INTERNAL_IP="10.20.0.1"
+
+# --- Resource defaults ------------------------------------------------------
+# Defaults for every VM in LAB_VMS below. A VM overrides any of these with a
+# cpu= / ram= / disk= field in its fleet entry.
+LAB_CPU=2
+LAB_RAM=2048
+LAB_DISK_GB=20
+
+# --- Base images (ARM64 / aarch64) ------------------------------------------
+# The gateway runs Debian genericcloud (small, stable router); the workstation
+# runs Kali. The base image is chosen per role (see scripts/lib.sh role_image).
+#
+# Debian publishes SHA512SUMS (not SHA256SUMS) next to its cloud images, so
+# DEBIAN_SHA_ALGO tells fetch-images.sh which digest to verify with.
+DEBIAN_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2"
+DEBIAN_SHA_URL="https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS"
+DEBIAN_SHA_ALGO=512
+
+# Kali workstation image (ARM64 genericcloud, cloud-init enabled). It ships as
+# a .tar.xz containing a raw disk (disk.raw); fetch-images.sh verifies the
+# archive, extracts it and renames it to KALI_IMG_FILE. The raw image is
+# ~25 GiB (already larger than LAB_DISK_GB, so create-vm.sh never shrinks it).
+#
+# The URLs point at Kali's per-release directory (kali-<version>/), NOT current/.
+# current/ only ever holds the newest build, so a pin there 404s the moment Kali
+# cuts a release; the versioned directory keeps its image and SHA256SUMS in place
+# afterwards. Bumping KALI_VERSION selects the matching directory, so pick any
+# release listed at https://kali.download/cloud-images/ (mirror of
+# https://www.kali.org/releases/). Very old releases are eventually pruned from
+# kali.download to https://old.kali.org/cloud-images/.
+KALI_VERSION="2026.2"
+KALI_IMG_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/kali-linux-${KALI_VERSION}-cloud-genericcloud-arm64.tar.xz"
+KALI_SHA_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/SHA256SUMS"
+KALI_IMG_FILE="kali-genericcloud-arm64.raw"
+
+# --- VM fleet ---------------------------------------------------------------
+# Each entry: "name:role [cpu=N] [ram=MiB] [disk=GB]"
+#
+#   name   short name: the UTM VM is LAB_PREFIX-name, and this is what
+#          'make ssh' and the Ansible inventory use
+#   role   maps to a base image (gateway=Debian, anything else=Kali), a NIC
+#          layout, a cloud-init seed and an Ansible group
+#   cpu    CPU cores       (default: LAB_CPU)
+#   ram    memory in MiB   (default: LAB_RAM)
+#   disk   disk size in GB (default: LAB_DISK_GB)
+#
+# The gateway MUST be index 1 (the first entry): its host SSH port is
+# 2200+index, and both the workstation's SSH ProxyJump and scripts/verify.sh
+# derive that port from index 1.
+#
+# Changing cpu= or ram= for a VM that already exists makes the next 'make up'
+# stop that VM, apply the change, and start it again. VMs whose cpu/ram did
+# not change are never restarted.
+#
+# disk= is only applied when a VM is first created: UTM imports the staged
+# disk into its own bundle at creation time, so raising disk= later has no
+# effect on a VM that already exists. To grow the disk of an existing VM, run
+# 'make destroy' then 'make up'. Disks are never shrunk either way.
+#
+# The workstation is disposable per assignment: 'make destroy' then 'make up'
+# clones it fresh from the base image.
+LAB_VMS=(
+  "gateway:gateway cpu=2 ram=2048 disk=20"
+  "workstation:workstation cpu=4 ram=4096 disk=60"
+)

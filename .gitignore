@@ -1,0 +1,21 @@
+# Downloaded base images (large, fetched on demand)
+images/*
+!images/.gitkeep
+
+# Generated per-deploy artifacts
+generated/
+*.seed.iso
+cloud-init/*.rendered.yaml
+
+# Ansible inventory generated from running VMs
+ansible/inventory/hosts.generated.yaml
+
+# Secrets and local config
+lab.conf
+*.pem
+id_ed25519
+id_ed25519.pub
+.vault_pass
+
+# Logs
+*.log

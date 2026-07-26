@@ -1,0 +1,65 @@
+#cloud-config
+# Base bootstrap for every lab VM. Placeholders (@@...@@) are filled in by
+# scripts/make-seed.sh. Role-specific software is installed by Ansible, not here,
+# so a single bootstrap keeps all VMs identical at first boot.
+
+hostname: "@@HOSTNAME@@"
+preserve_hostname: false
+
+users:
+  - name: "@@LAB_USER@@"
+    # no_user_group passes --no-user-group to useradd, so it does not try to
+    # create a group named after the user. Without it, any LAB_USER that
+    # happens to match an existing group fails the whole users_groups module:
+    # Debian and Kali ship legacy system groups (operator is GID 37, and staff,
+    # games, users and more exist too), and useradd then exits 9 with "group
+    # <name> exists". The user is never created, the key never lands, and
+    # every SSH login fails with "Permission denied (publickey)" while the VM
+    # otherwise boots fine. The user's primary group becomes the useradd
+    # default (users); sudo comes from the groups list below.
+    no_user_group: true
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "@@SSH_KEY@@"
+
+ssh_pwauth: false
+disable_root: true
+
+write_files:
+  # Disable periodic apt in this hands-off, throwaway lab. Without it,
+  # apt-daily-upgrade runs unattended-upgrades in the background and restarts
+  # openssh; a restart can orphan the running sshd, which keeps holding :22 and
+  # blocks ssh.socket from rebinding ("Address already in use"). ssh.service
+  # then fails its dependency, /run/sshd is never recreated, and every new
+  # connection is closed before the banner. Ansible manages packages here, so
+  # nothing needs the periodic timers.
+  - path: /etc/apt/apt.conf.d/99lab-no-periodic
+    content: |
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Download-Upgradeable-Packages "0";
+      APT::Periodic::Unattended-Upgrade "0";
+      APT::Periodic::AutocleanInterval "0";
+
+package_update: true
+packages:
+  - python3
+  - qemu-guest-agent
+
+runcmd:
+  - [systemctl, enable, --now, qemu-guest-agent]
+  # Pre-create Ansible's remote temp dir. Every play in the playbook runs with
+  # become: true, so Ansible operates as root and its remote_tmp resolves to
+  # /root/.ansible/tmp. If that dir is missing, Ansible creates it on the first
+  # module and prints "Module remote_tmp ... did not exist and was created with
+  # a mode of 0700". Creating it here (root-owned, 0700 -- exactly what Ansible
+  # wants) makes it already exist, so the warning never appears.
+  - [install, -d, -m, "0700", -o, root, -g, root, /root/.ansible/tmp]
+
+# Grow the root filesystem to fill the resized virtual disk.
+growpart:
+  mode: auto
+  devices: ["/"]
+resize_rootfs: true
