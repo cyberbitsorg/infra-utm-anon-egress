@@ -1,0 +1,57 @@
+# Managed by Ansible (role: gateway). Do not edit on the host.
+#
+# The workstation's only resolver. It listens on the internal segment and
+# loopback, NEVER the WAN NIC, and forwards only to Mullvad's in-tunnel resolver.
+# The nftables output chain drops any :53 leaving the WAN, so if this forwarder
+# were ever wrong DNS would fail rather than leak.
+#
+# This is a fragment in unbound.conf.d/, merged with Debian's own defaults. Its
+# settings win over anything the distribution ships because the include comes
+# last in /etc/unbound/unbound.conf.
+server:
+    interface: {{ internal_ip }}
+    interface: 127.0.0.1
+    port: 53
+
+    # Bind the internal address even if it is not up yet. Debian's unbound.service
+    # is ordered only After=network.target, which does NOT mean addresses are
+    # assigned, so a boot that starts unbound before netplan finishes would
+    # otherwise fail with "can't bind socket: Cannot assign requested address" and
+    # leave the workstation with no resolver until someone restarted it by hand.
+    ip-freebind: yes
+
+    # Only the isolated segment and the gateway itself may query.
+    access-control: 0.0.0.0/0 refuse
+    access-control: {{ lab_segment }} allow
+    access-control: 127.0.0.0/8 allow
+
+    do-ip4: yes
+    do-udp: yes
+    do-tcp: yes
+    # No IPv6 anywhere: the ip6 tables are policy drop, so a v6 query would be a
+    # guaranteed timeout rather than a fallback.
+    do-ip6: no
+
+    # Do not leak the resolver's identity or local zones upstream.
+    hide-identity: yes
+    hide-version: yes
+    do-not-query-localhost: yes
+
+    # Minimal logging. Query logs on an anonymity gateway are a liability: they
+    # would build exactly the record this repo exists to avoid.
+    verbosity: 0
+    log-queries: no
+    log-replies: no
+    use-syslog: yes
+
+    # Cache hardening.
+    qname-minimisation: yes
+    harden-glue: yes
+    harden-dnssec-stripped: yes
+    prefetch: yes
+
+# Forward everything to Mullvad's resolver, reachable only inside the tunnel.
+# No fallback: a second, clear-net forwarder would be a DNS leak by design.
+forward-zone:
+    name: "."
+    forward-addr: {{ mullvad_dns }}

@@ -53,6 +53,19 @@ table inet filter {
   chain forward {
     type filter hook forward priority 0; policy drop;
 
+    # unbound is the workstation's ONLY resolver. Without these two rules the
+    # accept below would happily forward a query to 1.1.1.1 into the tunnel: it
+    # would not leak the workstation's address (the exit node is the source) but
+    # it would hand a third party the full query stream and route around every
+    # policy unbound enforces. Design §3.3 requires that a direct :53 from the
+    # workstation to an external resolver fails, so drop it here.
+    #
+    # This does NOT touch queries to unbound itself: those are addressed to the
+    # gateway, so they land in the input chain, which accepts :53 on this NIC.
+    # Only traffic being FORWARDED past the gateway reaches these rules.
+    iifname "{{ anon_internal_if }}" udp dport 53 drop
+    iifname "{{ anon_internal_if }}" tcp dport 53 drop
+
     # The ONLY forward path in this repo. internal -> WAN is not expressed at all;
     # policy drop covers it. If wg0 does not exist, this rule matches nothing and
     # the workstation has no egress -- which is the entire promise.

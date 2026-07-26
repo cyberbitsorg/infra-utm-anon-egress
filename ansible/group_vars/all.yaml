@@ -1,6 +1,12 @@
 ---
 timezone: Europe/Amsterdam
 
+# The isolated internal segment, mirrored from lab.conf's LAB_SEGMENT for the
+# templates that need it (unbound's access-control). Kept in sync by hand: it is
+# build configuration, not a per-host fact, and changing the segment already means
+# editing lab.conf and rebuilding.
+lab_segment: "10.20.0.0/24"
+
 # Packages installed on every host.
 common_packages:
   - ca-certificates

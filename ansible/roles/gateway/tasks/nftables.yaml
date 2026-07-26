@@ -104,44 +104,11 @@
     state: started
     daemon_reload: true
 
-- name: Point the gateway's resolver through the tunnel
-  # ORDERING, not cosmetics. Until now the gateway resolved via SLIRP's 10.0.2.3
-  # (the bootstrap path from Task 1). The ruleset above drops :53 on the WAN, so
-  # that path is gone the moment it loads -- and Task 5 still has to `apt install
-  # unbound`, which needs working DNS. Mullvad's resolver is reachable inside the
-  # tunnel and permitted by `oifname wg0 accept`, so it bridges the gap without
-  # ever leaking a query. Task 5 replaces this with 127.0.0.1 once unbound is up.
-  #
-  # With the tunnel down this leaves the gateway with no DNS at all. That is the
-  # fail-closed promise applied consistently, not a defect.
-  #
-  # `follow: false` (the module default, stated explicitly because it is
-  # load-bearing here) REPLACES the symlink the Debian cloud image ships at
-  # /etc/resolv.conf -> /run/systemd/resolve/resolv.conf with a real file. Were
-  # it true, this would instead write into systemd-resolved's runtime file, which
-  # resolved rewrites and a reboot discards. systemd's own tmpfiles entry for
-  # that symlink is `L!` (create-if-absent, boot-only), so it does not put the
-  # symlink back over a regular file.
-  ansible.builtin.copy:
-    dest: /etc/resolv.conf
-    owner: root
-    group: root
-    mode: "0644"
-    follow: false
-    content: |
-      # Managed by Ansible (role: gateway).
-      # Mullvad's resolver, reachable only inside the WireGuard tunnel.
-      nameserver {{ mullvad_dns }}
-      options timeout:2 attempts:2
-
-- name: Stop cloud-init from rewriting resolv.conf
-  # A regenerated resolv.conf pointing back at 10.0.2.3 would not leak (the
-  # ruleset drops it) but it would silently break all gateway DNS on next boot.
-  ansible.builtin.copy:
-    dest: /etc/cloud/cloud.cfg.d/99-anon-egress-no-resolv.cfg
-    owner: root
-    group: root
-    mode: "0644"
-    content: |
-      # Managed by Ansible (role: gateway).
-      manage_resolv_conf: false
+# NOTE ON DNS: loading the ruleset above kills the gateway's own resolver. Until
+# this point it resolved via SLIRP's 10.0.2.3 (the bootstrap path from Task 1),
+# and this ruleset drops :53 on the WAN the moment it applies. Nothing between
+# there and the end of this file needs to resolve a name, so the gap is inert.
+# dns.yaml runs next: it bridges DNS through the tunnel long enough to install
+# unbound, then hands resolution to unbound on loopback. Every /etc/resolv.conf
+# decision lives in that one file -- when this task list also wrote resolv.conf,
+# the two fought and every single run reported both of them changed.

@@ -63,3 +63,14 @@
   ansible.builtin.include_tasks: nftables.yaml
   when: mullvad_wg_sanitized | default('') | length > 0
   tags: [vpn, nftables, killswitch]
+
+# MUST come after the nftables include, for two reasons. `apt install unbound`
+# needs DNS, and the only resolver that survives the ruleset is the in-tunnel
+# bridge that include writes. And unbound's answers reach the workstation only
+# because the input chain accepts :53 on the internal NIC. Same gate as above: a
+# resolver that can only forward through a tunnel is useless without one, and
+# pointing the gateway's resolv.conf at it would break DNS outright.
+- name: Configure tunnel-only DNS
+  ansible.builtin.include_tasks: dns.yaml
+  when: mullvad_wg_sanitized | default('') | length > 0
+  tags: [vpn, dns]
