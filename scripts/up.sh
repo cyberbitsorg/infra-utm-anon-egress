@@ -3,6 +3,7 @@
 # generate inventory -> Ansible. Fully hands-off.
 # Flags: --provision-only (no Ansible), --configure-only (Ansible only)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/wg-lib.sh"
 SCRIPTS="$(dirname "${BASH_SOURCE[0]}")"
 
 require_macos
@@ -28,24 +29,48 @@ run_ansible() {
   # -e key=value: command-line arguments are visible to every user on the host in
   # `ps auxww`, so a password passed that way is public for the length of the run.
   # Non-secret configuration stays in group_vars and the generated inventory.
-  local vars_file="" secrets
+  #
+  # The file is now created unconditionally (not just when secrets is non-empty):
+  # it also carries the sanitised WireGuard config path and endpoint below, and an
+  # empty YAML mapping is still valid input to `-e @file` (tests/secret-vars.sh).
+  local vars_file secrets
   secrets="$(render_secret_vars)"
-  if [[ -n "$secrets" ]]; then
-    vars_file="$(mktemp)"
-    chmod 600 "$vars_file"
-    # Bake the path into the trap so the file is removed even if ansible-playbook
-    # fails under set -e.
-    trap "rm -f '${vars_file}'" EXIT
-    printf '%s\n' "$secrets" > "$vars_file"
-    log "Passing $(grep -c ':' "$vars_file") secret(s) from .env via a 0600 vars file"
+  vars_file="$(mktemp)"
+  chmod 600 "$vars_file"
+  # Bake the path into the trap so the file is removed even if ansible-playbook
+  # fails under set -e.
+  trap "rm -f '${vars_file}'" EXIT
+  printf '%s\n' "$secrets" > "$vars_file"
+  [[ -n "$secrets" ]] \
+    && log "Passing $(grep -c ':' <<<"$secrets") secret(s) from .env via a 0600 vars file"
+
+  # The config is sanitised HERE, in bash, because that transformation is unit
+  # tested (tests/wg-config.sh) and because Ansible should receive a file that is
+  # already exactly what belongs on the gateway. The temp copy is 0600 and removed
+  # by the same trap as the vars file.
+  #
+  # mullvad_wg_config (emitted into $vars_file above by render_secret_vars) keeps
+  # meaning the operator's original .env path. The gateway role never reads that
+  # path directly -- it consumes the sanitised copy below, staged under a
+  # DIFFERENT key (mullvad_wg_sanitized) so the two never collide as duplicate
+  # YAML keys in the same vars file.
+  local wg_src wg_tmp=""
+  if [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
+    wg_src="${MULLVAD_WG_CONFIG}"
+    [[ "$wg_src" = /* ]] || wg_src="${REPO_ROOT}/${wg_src}"
+    validate_wg_config "$wg_src" || die "The WireGuard config is not usable (reason above)."
+    wg_tmp="$(mktemp)"
+    chmod 600 "$wg_tmp"
+    sanitize_wg_config "$wg_src" > "$wg_tmp"
+    printf "mullvad_wg_sanitized: '%s'\n" "$wg_tmp" >> "$vars_file"
+    printf "mullvad_endpoint_ip: '%s'\n" "$(wg_endpoint_ip "$wg_src")" >> "$vars_file"
+    printf "mullvad_endpoint_port: '%s'\n" "$(wg_endpoint_port "$wg_src")" >> "$vars_file"
+    trap "rm -f '${vars_file}' '${wg_tmp}'" EXIT
+    log "Sanitised WireGuard config staged (endpoint $(wg_endpoint_ip "$wg_src"):$(wg_endpoint_port "$wg_src"))"
   fi
 
   log "Running Ansible playbook"
-  if [[ -n "$vars_file" ]]; then
-    ( cd "$REPO_ROOT" && ansible-playbook "${ANSIBLE_DIR}/playbook.yaml" -e "@${vars_file}" )
-  else
-    ( cd "$REPO_ROOT" && ansible-playbook "${ANSIBLE_DIR}/playbook.yaml" )
-  fi
+  ( cd "$REPO_ROOT" && ansible-playbook "${ANSIBLE_DIR}/playbook.yaml" -e "@${vars_file}" )
   ok "Configuration complete"
 }
 

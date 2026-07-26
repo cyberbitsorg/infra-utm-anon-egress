@@ -8,3 +8,32 @@
 #
 # SSH is key-only regardless of this setting.
 gateway_console_password: ""
+
+# Path on the CONTROL NODE to the operator's original WireGuard config (from
+# MULLVAD_WG_CONFIG in .env, threaded through by render_secret_vars). No task in
+# this role reads it directly -- it exists only so the vars file's
+# `mullvad_wg_config` key always resolves to a defined variable. The role
+# consumes the SANITISED copy below instead.
+mullvad_wg_config: ""
+
+# Path on the CONTROL NODE to the sanitised WireGuard config (DNS line and IPv6
+# stripped), injected by scripts/up.sh. Empty means "no tunnel": every Phase 2
+# task below is skipped and the workstation keeps Phase 1's zero egress, which
+# is a safe state, not a broken one.
+mullvad_wg_sanitized: ""
+mullvad_endpoint_ip: ""
+mullvad_endpoint_port: ""
+
+# WireGuard interface name. Hardcoded rather than derived so the nftables ruleset
+# can reference it statically.
+wg_interface: wg0
+
+# MTU for the tunnel. WireGuard's default is 1420, but this tunnel runs over
+# QEMU's SLIRP NAT where the effective path MTU is smaller; too large silently
+# breaks large packets (TLS handshakes stall) while ping still works. Verified in
+# Task 7.
+wg_mtu: 1280
+
+# Mullvad's resolver, reachable only inside the tunnel. Confirm against the
+# generated config's DNS line before trusting this default (design §6).
+mullvad_dns: "10.64.0.1"

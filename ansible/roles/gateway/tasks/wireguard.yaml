@@ -1,0 +1,72 @@
+---
+# Derive the interface names ONCE, here, and let Task 4's ruleset consume them.
+# Hardcoding enp0s1/enp0s2 would be a ruleset that looks right and leaks the day
+# the kernel names them differently.
+- name: Find the internal NIC (the one holding the gateway's segment address)
+  ansible.builtin.set_fact:
+    anon_internal_if: >-
+      {{ ansible_facts.interfaces
+         | map('regex_replace', '^', '')
+         | select('ne', 'lo')
+         | map('extract', ansible_facts)
+         | selectattr('ipv4', 'defined')
+         | selectattr('ipv4.address', 'equalto', internal_ip)
+         | map(attribute='device') | list | first | default('') }}
+
+- name: Find the WAN NIC (the one with the default route)
+  ansible.builtin.set_fact:
+    anon_wan_if: "{{ ansible_facts.default_ipv4.interface | default('') }}"
+
+- name: Fail if either interface could not be identified
+  # Loudly, not silently: a wrong interface name produces a ruleset that passes
+  # inspection and permits egress on the wrong NIC.
+  ansible.builtin.assert:
+    that:
+      - anon_internal_if | length > 0
+      - anon_wan_if | length > 0
+      - anon_internal_if != anon_wan_if
+    fail_msg: >-
+      Could not identify the NICs unambiguously (internal='{{ anon_internal_if }}',
+      wan='{{ anon_wan_if }}'). Expected one interface holding {{ internal_ip }}
+      and a different one with the default route.
+
+- name: Install WireGuard
+  # wireguard-tools only: no vendor daemon. Mullvad's app is amd64-only and would
+  # manage its own routes and firewall rules against ours anyway.
+  ansible.builtin.apt:
+    name: wireguard-tools
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Read the sanitised WireGuard config
+  # Read once into a fact so the MTU pin below can be folded into the same
+  # write as the config install -- see the next task for why they cannot be
+  # two separate tasks (copy, then lineinfile).
+  ansible.builtin.set_fact:
+    anon_wg_conf_raw: "{{ lookup('file', mullvad_wg_sanitized) }}"
+  no_log: true
+
+- name: Install the WireGuard config with the tunnel MTU pinned
+  # Already sanitised by scripts/up.sh (DNS line removed, IPv6 stripped). MTU
+  # is pinned HERE rather than in the operator's file so regenerating the
+  # config on Mullvad's site cannot silently revert it.
+  #
+  # Deliberately ONE task, not copy-then-lineinfile: scripts/up.sh writes a
+  # FRESH sanitised temp file on every `make configure` (it never contains
+  # MTU -- that is only ever added here), so a plain `copy` of that file
+  # followed by a separate `lineinfile` adding MTU is NOT idempotent: the copy
+  # re-installs the MTU-less file every run, lineinfile puts MTU back, and the
+  # handler restarts wg-quick on every single run, forever (confirmed: three
+  # consecutive `make configure` runs each reported changed=3 on this pair).
+  # Building the final content (sanitised config + MTU line) once, here, and
+  # writing it with a single `copy` keeps the destination byte-for-byte stable
+  # across runs whenever the operator's source config is unchanged.
+  ansible.builtin.copy:
+    content: "{{ anon_wg_conf_raw | regex_replace('(^\\[Interface\\][^\\n]*\\n)', '\\1MTU = ' ~ wg_mtu ~ '\\n', multiline=true) }}"
+    dest: "/etc/wireguard/{{ wg_interface }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart WireGuard

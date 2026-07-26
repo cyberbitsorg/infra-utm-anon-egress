@@ -35,3 +35,12 @@
   changed_when: false
   no_log: true
   when: (gateway_console_password | default('')) | length > 0
+
+# Everything below needs a tunnel. With no sanitised config the gateway stays
+# exactly as Phase 1 left it and the workstation keeps zero egress -- a safe
+# state. Gated on mullvad_wg_sanitized (the file the role actually reads), not
+# mullvad_wg_config (the operator's original path, which no task here touches).
+- name: Configure the anonymity layer
+  ansible.builtin.include_tasks: wireguard.yaml
+  when: mullvad_wg_sanitized | default('') | length > 0
+  tags: [vpn, wireguard]
