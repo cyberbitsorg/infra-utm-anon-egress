@@ -45,7 +45,7 @@ fetch_debian() {
 # archive, not the raw disk we extract from it. So once extracted we record the
 # raw disk's own checksum in a sidecar and re-check it on every later run --
 # otherwise a truncated first extraction would be trusted forever (unlike the
-# Ubuntu image, whose upstream checksum re-verifies the file we actually keep).
+# Debian image, whose upstream checksum re-verifies the file we actually keep).
 fetch_kali() {
   local out sidecar archive sums base
   out="${IMAGES_DIR}/${KALI_IMG_FILE}"

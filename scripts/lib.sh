@@ -55,7 +55,7 @@ load_config() {
   LAB_SSH_KEY="${LAB_SSH_KEY/#\$\{HOME\}/$HOME}"
 }
 
-# Full UTM VM name for a short role name (e.g. attacker -> redteam-attacker).
+# Full UTM VM name for a short name (e.g. gateway -> anon-gateway).
 vm_name() { echo "${LAB_PREFIX}-$1"; }
 
 # Private key path derived from the public key in lab.conf.
@@ -168,7 +168,7 @@ parse_vm_entry() {
 
 # --- Platform guard ---------------------------------------------------------
 require_macos() {
-  [[ "$(uname -s)" == "Darwin" ]] || die "This lab provisions UTM VMs and must run on macOS."
+  [[ "$(uname -s)" == "Darwin" ]] || die "This provisions UTM VMs and must run on macOS."
 }
 
 # Locate a qemu-img binary: prefer Homebrew, fall back to the one bundled in UTM.

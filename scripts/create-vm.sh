@@ -121,7 +121,7 @@ base_img="$(role_image "$role")"
 QEMU_IMG="$(find_qemu_img)" || die "qemu-img not found"
 
 # Name the working disk by its actual format so UTM/QEMU never guess wrong
-# (Ubuntu ships qcow2-in-.img, Kali ships raw-in-.raw).
+# (Debian ships qcow2-in-.qcow2, Kali ships raw-in-.raw).
 img_fmt="$("$QEMU_IMG" info "$base_img" | sed -n 's/^file format: //p' | head -1)"
 case "$img_fmt" in
   qcow2) vm_disk="${GEN_DIR}/${name}.qcow2" ;;
