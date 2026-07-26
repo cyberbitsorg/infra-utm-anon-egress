@@ -1,10 +1,11 @@
 ---
-# Phase 1 stub. The real content -- VPN client (Nym default, Mullvad fallback),
-# the fail-closed nftables kill-switch, a tunnel-bound resolver and IPv6 drop --
-# lands in Phase 2. See docs/superpowers/plans/.
+# The gateway is the whole anonymity layer. This file is the running order, and
+# the order is load-bearing: wireguard.yaml derives the interface facts that the
+# ruleset consumes, nftables.yaml closes the box, and dns.yaml then bridges DNS
+# through the tunnel it just became the only path for. See the includes below.
 #
 # The marker file exists so 'make up' proves Ansible actually reached this host.
-- name: Mark gateway provisioned (Phase 1)
+- name: Mark gateway provisioned
   ansible.builtin.copy:
     dest: /etc/anon-egress-role
     content: "gateway\n"

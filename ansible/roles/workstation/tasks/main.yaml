@@ -1,12 +1,12 @@
 ---
-# Phase 1 content is the marker file. The Kali toolset and Mullvad Browser land
-# in Phase 3, once the gateway actually provides egress. See docs/superpowers/.
+# The Kali toolset and Mullvad Browser land in Phase 3. What is here now is the
+# console kernel and the console's security posture.
 #
 # EVERYTHING here that touches the network must stay behind
-# workstation_console_kernel (or a later equivalent flag): in Phase 1 this host
-# has no route to a package mirror at all, by design, and that is the milestone
-# rather than a defect.
-- name: Mark workstation provisioned (Phase 1)
+# workstation_has_egress: this host reaches a package mirror ONLY because the
+# gateway forwards it into the tunnel. Remove the tunnel and it has no route at
+# all, by design -- so a task that assumes apt works would hang rather than fail.
+- name: Mark workstation provisioned
   ansible.builtin.copy:
     dest: /etc/anon-egress-role
     content: "workstation\n"
@@ -14,7 +14,7 @@
     group: root
     mode: "0644"
 
-# --- UTM console (needs egress; off until Phase 2) --------------------------
+# --- UTM console (needs egress, so it waited for the tunnel) -----------------
 #
 # Kali publishes only the "genericcloud" cloud image, whose
 # linux-image-cloud-arm64 kernel is built with NO DRM drivers: the guest sees
