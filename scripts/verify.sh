@@ -36,8 +36,8 @@ done
 
 gw_port="$(ssh_port_for "$gw_idx")"
 gw_ip="${GATEWAY_INTERNAL_IP:-10.20.0.1}"
-jump=(-o "ProxyJump=${LAB_USER}@127.0.0.1:${gw_port}"
-      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+jump=(-o "ProxyCommand=$(ssh_jump_proxycommand "$gw_port")"
+      "${SSH_HOSTKEY_OPTS[@]}"
       -o ConnectTimeout=10 -o BatchMode=yes -i "$(priv_key)")
 
 fails=0

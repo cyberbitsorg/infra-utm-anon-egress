@@ -30,7 +30,7 @@ done
 
 key="$(priv_key)"
 gw_port="$(ssh_port_for "$gw_idx")"
-common=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+common=(-i "$key" "${SSH_HOSTKEY_OPTS[@]}")
 
 if [[ "$(nic_layout_for_role "$target_role")" == "dual" ]]; then
   port="$(ssh_port_for "$target_idx")"
@@ -41,5 +41,5 @@ fi
 internal_ip="$(internal_ip_for "$target_role" "$target_idx")"
 log "Connecting to ${short} (${internal_ip}) via the gateway on 127.0.0.1:${gw_port}"
 exec ssh "${common[@]}" \
-  -o ProxyJump="${LAB_USER}@127.0.0.1:${gw_port}" \
+  -o ProxyCommand="$(ssh_jump_proxycommand "$gw_port")" \
   "${LAB_USER}@${internal_ip}"

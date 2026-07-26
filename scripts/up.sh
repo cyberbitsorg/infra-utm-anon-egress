@@ -66,15 +66,19 @@ while read -r short role name port internal_ip nic_layout; do
 done <<<"$provisioned"
 
 log "Waiting for internal-only VMs to accept SSH through the gateway"
+jump_pc="$(ssh_jump_proxycommand "$GATEWAY_PORT")"
 while read -r short role name port internal_ip nic_layout; do
   [[ "$nic_layout" == "internal" ]] || continue
   deadline=$(( $(date +%s) + 420 ))
-  until ssh -o ProxyJump="${LAB_USER}@127.0.0.1:${GATEWAY_PORT}" \
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=5 -o BatchMode=yes -i "$(priv_key)" \
-            "${LAB_USER}@${internal_ip}" true 2>/dev/null; do
-    [[ $(date +%s) -lt $deadline ]] \
-      || die "Timed out waiting for ${name} at ${internal_ip} through the gateway"
+  # The last error is kept and reported on timeout. Swallowing it makes a
+  # client-side failure (a bad ProxyCommand, a missing key) look exactly like a
+  # guest that has not booted yet, and you burn the full timeout before finding
+  # out the guest was up all along.
+  while :; do
+    last_err="$(ssh -o ProxyCommand="$jump_pc" "${SSH_HOSTKEY_OPTS[@]}" \
+                    -o ConnectTimeout=5 -o BatchMode=yes -i "$(priv_key)" \
+                    "${LAB_USER}@${internal_ip}" true 2>&1)" && break
+    [[ $(date +%s) -lt $deadline ]] || die "Timed out waiting for ${name} at ${internal_ip} through the gateway. Last SSH error: ${last_err}"
     sleep 5
   done
   ok "SSH is up on ${name} (${internal_ip}, via the gateway)"

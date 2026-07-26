@@ -111,6 +111,28 @@ internal_ip_for() {
   esac
 }
 
+# --- SSH --------------------------------------------------------------------
+# Host-key options every connection in this repo uses. These VMs are disposable
+# by design -- 'make destroy && make up' hands the workstation a brand new host
+# key -- so pinning them would break on the next rebuild, and /dev/null keeps
+# that churn out of the operator's real known_hosts.
+SSH_HOSTKEY_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
+# The ProxyCommand that reaches an internal-only VM through the gateway.
+# Usage: ssh -o ProxyCommand="$(ssh_jump_proxycommand "$gw_port")" ...
+#
+# It MUST be a ProxyCommand with the options spelled out INSIDE it, never a bare
+# '-o ProxyJump=user@host:port'. Per ssh_config(5), directives given on the
+# command line apply to the destination and NOT to a jump host: a ProxyJump hop
+# therefore silently falls back to StrictHostKeyChecking=ask, and anywhere there
+# is no tty (BatchMode, Ansible, verify.sh, up.sh's readiness wait) it dies with
+# "Host key verification failed" while the guest is up and answering fine. That
+# cost a whole 420s build timeout once; tests/ssh-jump.sh pins it.
+ssh_jump_proxycommand() {
+  local gw_port="${1:?gateway port required}"
+  echo "ssh -W %h:%p -i $(priv_key) ${SSH_HOSTKEY_OPTS[*]} -o ConnectTimeout=10 -p ${gw_port} ${LAB_USER}@127.0.0.1"
+}
+
 # Parse one LAB_VMS entry into VM_SHORT / VM_ROLE / VM_CPU / VM_RAM / VM_DISK.
 #
 # Entry syntax: "name:role [cpu=N] [ram=MiB] [disk=GB]"
