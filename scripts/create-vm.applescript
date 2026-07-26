@@ -51,10 +51,25 @@ on run argv
 	-- spin ~200%, no network ever comes up). A VirtIO drive boots cleanly, and the
 	-- NoCloud datasource still finds it by the "cidata" filesystem label.
 	--
-	-- NOTE: a `virtio-gpu-pci` display is attached so UTM shows a real console
-	-- (the cloud images boot with `console=tty1` and a getty on tty1). Without it
-	-- UTM renders `-vga none` and the VM window is just black. The VMs are driven
-	-- over SSH/Ansible; the display is only for eyeballing one.
+	-- NOTE: the display is effectively decorative here, and UTM will always say
+	-- "Display output is not active" for it. Both base images run the distro's
+	-- '-cloud' kernel flavour, which ships NO DRM drivers (no virtio-gpu, no
+	-- framebuffer): the guest sees the virtio-gpu-pci device but nothing binds to
+	-- it. The display is kept anyway because a VM with no display at all is
+	-- awkward in the UTM GUI, and a future non-cloud kernel would light it up.
+	--
+	-- The SERIAL port is the console that actually works: the guests put their
+	-- kernel console and a getty on ttyAMA0, and UTM's DEFAULT for a new QEMU VM
+	-- already attaches one pl011 UART exposed to the host as a pseudo-tty
+	-- (interface:ptty). scripts/console.sh queries that pty and attaches to it.
+	--
+	-- NOTE: do NOT add `serial ports:{{interface:ptty}}` to this record to make
+	-- that explicit. UTM 4.7.x rejects the whole configuration with -1700 ("Can't
+	-- make {...} into type qemu configuration"), the same enum-coercion quirk as
+	-- `protocol:TCP` on the port forward above. Relying on UTM's default is the
+	-- only way to get the serial device at creation time; if a future UTM ever
+	-- drops that default, add the device in the GUI (Edit -> new device -> Serial)
+	-- and console.sh will pick it up.
 	tell application "UTM"
 		if nicLayout is "dual" then
 			set nics to {{mode:emulated, address:macNat, port forwards:{{host address:"127.0.0.1", host port:sshPort, guest port:22}}}, {mode:host, address:macInternal}}

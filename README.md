@@ -86,6 +86,7 @@ make provision   # create and boot VMs only (no Ansible)
 make configure   # run Ansible against running VMs
 make status      # VM status via utmctl
 make ssh <name>  # gateway (direct) or workstation (via the gateway)
+make console <n> # serial console (the UTM display never works, see below)
 make verify      # security property: workstation isolated but reaches gateway
 make test        # shell unit tests, no UTM needed
 make lint        # bash -n on scripts, ansible-lint if present
@@ -116,6 +117,35 @@ on purpose — the security property depends on it:
 The gateway must stay the **first** fleet entry: its host SSH port is
 `2300 + index` (`ssh_port_for`), and both the workstation's ProxyJump and `scripts/verify.sh`
 derive that port from index 1.
+
+## The UTM display says "Display output is not active"
+
+That is expected and permanent. Both base images run the distro's **`-cloud`
+kernel flavour**, which is built with no DRM drivers at all — no virtio-gpu, no
+framebuffer. The guest sees UTM's display device (`lspci` shows the Virtio GPU)
+but nothing ever binds to it, so the display view stays dark no matter what.
+
+The console that works is the **serial** one: the guests put their kernel console
+and a getty on `ttyAMA0`, and UTM exposes it to the host as a pseudo-tty.
+
+```bash
+make console gateway        # attaches with screen; detach: Ctrl-a k, then y
+make console workstation
+```
+
+Two things worth knowing:
+
+- The pty path (`/dev/ttysNNN`) is assigned by UTM at VM start and **changes on
+  every boot**, which is why `make console` queries it live instead of hardcoding it.
+- `cloud-init` sets `lock_passwd: true`, so the login prompt on that console
+  cannot be passed. It is a **diagnostic** channel — boot messages, cloud-init
+  failures — not a way in, and not a recovery path. If you want it to be one, set
+  a console password deliberately (SSH stays key-only either way).
+
+If you would rather have the console *inside* the UTM window, switch the VM's
+serial device to "Built-in Terminal" in UTM (Edit → Serial, VM stopped). That
+takes the pty away from the host; `make console` detects this and points you at
+the window instead.
 
 ## Threat model, honestly
 

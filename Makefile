@@ -5,15 +5,15 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help preflight up provision configure status ssh down destroy lint test verify
+.PHONY: help preflight up provision configure status ssh console down destroy lint test verify
 
-# Allow `make ssh workstation` (bare VM name) alongside `make ssh VM=workstation`.
-# When ssh is the goal, the remaining goals are the VM name: capture them and
+# Allow `make ssh workstation` (bare VM name) alongside `make ssh VM=workstation`;
+# same for `make console`. When one of them is the goal, the remaining goals are the VM name: capture them and
 # stub each out as a no-op target so make does not fail with "no rule to make
 # target". Guarded on ssh being the first goal so typos on other targets still
 # error normally. (A VM must therefore not share a name with a make target.)
-ifeq ($(firstword $(MAKECMDGOALS)),ssh)
-SSH_ARGS := $(filter-out ssh,$(MAKECMDGOALS))
+ifneq ($(filter $(firstword $(MAKECMDGOALS)),ssh console),)
+SSH_ARGS := $(filter-out ssh console,$(MAKECMDGOALS))
 ifneq ($(SSH_ARGS),)
 .PHONY: $(SSH_ARGS)
 $(eval $(SSH_ARGS):;@:)
@@ -41,6 +41,9 @@ status: ## Show status of all VMs
 
 ssh: ## SSH into a VM: make ssh gateway | make ssh workstation
 	@scripts/ssh.sh $(or $(VM),$(SSH_ARGS))
+
+console: ## Serial console (the display never works: cloud kernels have no DRM)
+	@scripts/console.sh $(or $(VM),$(SSH_ARGS))
 
 down: ## Stop all VMs (keeps them for later)
 	@scripts/down.sh
