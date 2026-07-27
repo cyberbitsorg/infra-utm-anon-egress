@@ -304,7 +304,45 @@ while read -r short role vm_idx; do
     note_fail "${short} has ${count} NICs (${nics% }); an internal-only VM must have exactly one"
   fi
 
-  # 3. Positive controls for the tools the leak checks rely on. A bash built
+  # 3. No VPN client, of any kind, on an internal-only host.
+  #
+  # This is the machine-checkable form of "credentials live only on the gateway".
+  # Nothing else in this suite can see it: a VPN client sitting installed and
+  # unconfigured leaks nothing today, so every network probe stays green while the
+  # box acquires exactly the capability the design forbids.
+  #
+  # It guards two real drift paths. The Mullvad repo added for the browser also
+  # carries `mullvad-vpn` for arm64 (an apt pin blocks it, and this catches the
+  # pin being removed). And the Kali desktop RECOMMENDS ten NetworkManager VPN
+  # plugins, which are purged at install time -- but a later dist-upgrade can
+  # re-satisfy a Recommends and quietly put an OpenVPN GUI back on the machine
+  # months after anyone last looked.
+  #
+  # The trailing sentinel distinguishes "scanned, found nothing" from "the scan
+  # never ran": an ssh failure prints nothing at all, which would otherwise be
+  # indistinguishable from a clean host and would score as a pass.
+  vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' \
+      mullvad-vpn \
+      network-manager-openvpn network-manager-openvpn-gnome \
+      network-manager-pptp network-manager-pptp-gnome \
+      network-manager-l2tp network-manager-l2tp-gnome \
+      network-manager-openconnect network-manager-openconnect-gnome \
+      network-manager-vpnc network-manager-vpnc-gnome \
+      network-manager-fortisslvpn network-manager-fortisslvpn-gnome \
+      2>/dev/null | awk '\$2 == \"installed\" { printf \"%s \", \$1 }'; echo __vpnscan=done" \
+      2>/dev/null | tr -d '\r' || true)"
+  if ! grep -q '__vpnscan=done' <<<"$vpn_scan"; then
+    note_fail "the VPN-client scan did not run on ${short}; cannot assert credentials are gateway-only"
+  else
+    vpn_found="$(sed 's/__vpnscan=done//' <<<"$vpn_scan" | tr -s ' ' | sed 's/^ *//;s/ *$//')"
+    if [[ -n "$vpn_found" ]]; then
+      note_fail "${short} has VPN client package(s) installed, which an internal-only host must never have: ${vpn_found}"
+    else
+      ok "${short} has no VPN client installed (credentials stay on the gateway)"
+    fi
+  fi
+
+  # 4. Positive controls for the tools the leak checks rely on. A bash built
   # without /dev/tcp, or a ping that cannot do IPv6, fails a probe in exactly the
   # same way a blocked packet does -- which would make the corresponding leak
   # check permanently, silently green.
@@ -318,7 +356,7 @@ while read -r short role vm_idx; do
     "ping6 control"
 
   if [[ "$PHASE" == "1" ]]; then
-    # 4. Isolation: no path off the segment. ICMP to a public address, then a TCP
+    # 5. Isolation: no path off the segment. ICMP to a public address, then a TCP
     # connect, because a dropped ping alone would not rule out a working route.
     expect_blocked "$(ws_probe "$ip" "ping -c1 -W3 1.1.1.1 >/dev/null 2>&1")" \
       "${short} has no ICMP path to the internet (correct for Phase 1)" \
