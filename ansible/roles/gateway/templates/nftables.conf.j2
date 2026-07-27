@@ -116,11 +116,32 @@ table inet filter {
     oifname "{{ anon_wan_if }}" ip daddr {{ mullvad_endpoint_ip }} udp dport {{ mullvad_endpoint_port }} accept
 
     # Replies to the INBOUND management SSH, and nothing else, on the WAN NIC.
-    # Scoped to source port 22 so an established flow can never carry anything
-    # else out in clear-net. Originating a new flow from source port 22 is
-    # root-only and would still need an inbound packet first, which no rule
-    # permits -- so this cannot be turned into an egress path.
-    oifname "{{ anon_wan_if }}" tcp sport 22 ct state established,related accept
+    # Scoped to source port 22 so this cannot carry anything else out in
+    # clear-net. Originating a new flow from source port 22 is root-only and
+    # would still need an inbound packet first, which no rule permits -- so it
+    # cannot be turned into an egress path.
+    #
+    # DELIBERATELY STATELESS: no `ct state established,related` here, unlike
+    # every other accept in this file. That qualifier made `make up` hang forever
+    # on a COLD build, and the mechanism is worth writing down because it is
+    # invisible on a warm one.
+    #
+    # conntrack only begins tracking when a ruleset that references `ct` is
+    # first loaded. On a fresh gateway that moment is the "Enable nftables at
+    # boot" task -- by which point Ansible is already connected over SSH. That
+    # in-flight connection has no conntrack entry, so the gateway's replies fail
+    # `ct state established`, get dropped by the policy, and the connection dies
+    # mid-task. The RST is dropped by the same rule, so the control node is never
+    # told: ssh waits forever, ansible waits on ssh, and `make up` hangs at that
+    # exact task with no error. Observed: a 15-minute stall, then nothing.
+    #
+    # Making the management path stateless in BOTH directions (the input chain's
+    # `tcp dport 22` is already stateless) means the one connection used to
+    # repair this box can never be cut by the firewall's own state. For a machine
+    # whose entire job is to be closed, being unable to lock yourself out of the
+    # repair path is worth more than the marginal tightening that `ct state`
+    # bought here.
+    oifname "{{ anon_wan_if }}" tcp sport 22 accept
 
     # The gateway must be able to ORIGINATE one thing on the internal segment:
     # a TCP connection to port 22. Ansible and scripts/ssh.sh reach the

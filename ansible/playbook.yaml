@@ -2,20 +2,33 @@
 # Configures the two VMs after provisioning. Idempotent: safe to re-run.
 # Run subsets with tags, e.g. --tags gateway or --tags workstation.
 #
-# ORDER MATTERS. The workstation has no host port forward: its inventory entry
-# reaches it with a ProxyCommand through the gateway. The gateway play therefore
-# has to come first, and any future gateway change that breaks SSH forwarding
-# also cuts Ansible off from the workstation.
+# ORDER MATTERS, for two separate reasons.
+#
+# 1. REACHABILITY. The workstation has no host port forward: its inventory entry
+#    reaches it with a ProxyCommand through the gateway. Any gateway change that
+#    breaks SSH forwarding also cuts Ansible off from the workstation.
+#
+# 2. EGRESS. The workstation has no route to a package mirror until the gateway
+#    play brings up the tunnel and the kill-switch that forwards it. So the base
+#    play is SPLIT: `common` runs on the gateway before the gateway play, and on
+#    the internal-only hosts after it. A single `hosts: all` base play looks
+#    tidier and fails every cold build -- `apt update` on the workstation runs
+#    while its egress does not yet exist, and dies with "Failed to update apt
+#    cache after 5 retries". It only appears to work when re-run against a lab
+#    whose tunnel is already up from a previous build.
 
-- name: Base configuration for all hosts
+- name: Wait for first boot on all hosts
+  # Needs no network beyond the SSH hop, so it can safely cover every host up
+  # front -- and doing it here surfaces a workstation whose first boot is broken
+  # before the gateway play spends minutes configuring a tunnel for it.
   hosts: all
   become: true
   gather_facts: true
-  pre_tasks:
+  tasks:
     # sshd answers long before cloud-init has finished, so 'make up' would
     # otherwise start configuring a host whose first boot is still in progress.
-    # That is not theoretical: cloud-init's own `apt update` raced this role's
-    # apt task and made a package that exists ("dnsutils") momentarily
+    # That is not theoretical: cloud-init's own `apt update` raced the common
+    # role's apt task and made a package that exists ("dnsutils") momentarily
     # unresolvable, failing the whole build. Waiting here rather than in up.sh
     # covers 'make configure' as well.
     - name: Wait for cloud-init to finish first boot
@@ -34,6 +47,11 @@
           Check /var/log/cloud-init.log -- something in the seed did not apply.
       when: anon_cloud_init.rc == 2
 
+- name: Base configuration for the gateway
+  # Before the gateway role, because the gateway still has its cloud-init
+  # bootstrap resolver here. The kill-switch has not loaded yet, so apt works.
+  hosts: role_gateway
+  become: true
   roles:
     - role: common
       tags: [common, base]
@@ -44,6 +62,16 @@
   roles:
     - role: gateway
       tags: [gateway]
+
+- name: Base configuration for the internal-only hosts
+  # AFTER the gateway play: these hosts reach a mirror only through the tunnel it
+  # just brought up. Expressed as "everything that is not the gateway" so a third
+  # internal VM inherits the correct ordering without touching this file.
+  hosts: all:!role_gateway
+  become: true
+  roles:
+    - role: common
+      tags: [common, base]
 
 - name: Configure workstation
   hosts: role_workstation

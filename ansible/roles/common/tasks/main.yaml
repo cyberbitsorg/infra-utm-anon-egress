@@ -3,17 +3,35 @@
   community.general.timezone:
     name: "{{ timezone }}"
 
+- name: Update the apt cache
+  # Deliberately its own task, and deliberately WITHOUT cache_valid_time.
+  #
+  # Folding this into the install below as `update_cache: true` +
+  # `cache_valid_time: 3600` produces a genuinely nasty failure: a FAILED update
+  # still leaves a recent timestamp, so for the next hour every retry SKIPS the
+  # update and the install then reports "No package matching 'curl' is
+  # available". The real cause (no mirror reachable) is nowhere in that message,
+  # and re-running does not help until the hour is up. Seen on the first build
+  # after the workstation gained egress.
+  #
+  # The retries matter for the same reason: this runs moments after the gateway's
+  # tunnel came up, and the first attempt can land before the route is usable.
+  ansible.builtin.apt:
+    update_cache: true
+  register: anon_apt_update
+  retries: 3
+  delay: 10
+  until: anon_apt_update is succeeded
+  when: common_packages | length > 0
+
 - name: Install common packages
   ansible.builtin.apt:
     name: "{{ common_packages }}"
     state: present
-    update_cache: true
-    cache_valid_time: 3600
-  # An internal-only host has no route to a package mirror until the gateway
-  # provides egress (Phase 2), so its group_vars set common_packages to an empty
-  # list. Skipping on empty keeps that a configuration choice rather than a
-  # guaranteed apt timeout, and the day the workstation does have egress the
-  # list is simply filled in.
+  # An internal-only host reaches a mirror ONLY through the gateway's tunnel, so
+  # its group_vars set common_packages to an empty list whenever that egress does
+  # not exist. Skipping on empty keeps that a configuration choice rather than a
+  # guaranteed apt timeout.
   when: common_packages | length > 0
 
 - name: Deploy MOTD

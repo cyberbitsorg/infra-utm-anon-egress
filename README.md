@@ -82,6 +82,74 @@ starts anything that is stopped. `make destroy` deletes both VMs and
 `generated/`, keeping the base images — that is also the disposable-workstation
 mechanism: destroy, then `make up` clones a fresh Kali from the base image.
 
+## How long `make up` takes, and how to watch it
+
+A full cold build — `make destroy`, then `make up` — was **measured at about
+3 minutes** end to end on an M-series Mac with the base images already
+downloaded. If yours takes noticeably longer, the two things that vary are named
+below; if it takes *much* longer with an idle VM, see "When it is genuinely
+stuck".
+
+What `make up` does, in order:
+
+| Phase | What happens |
+|-------|--------------|
+| Preflight | tool checks, SSH key, `.env`, WireGuard config validation |
+| Base images | verified against their published checksums. **The first run ever downloads them**, and the Kali image alone is ~25 GiB raw — that download dominates everything else and can take tens of minutes on a slow link. Every later build reuses the cache |
+| Staging | a per-VM disk is cloned from each base image and resized. Effectively free on APFS, which copies on write |
+| Provisioning | UTM creates and boots both VMs, then the build waits for SSH |
+| cloud-init | first boot: user, keys, static addressing |
+| Ansible — gateway | WireGuard, the kill-switch, unbound |
+| Ansible — workstation | packages **and a whole kernel, downloaded through the VPN**, then a reboot |
+
+The last row is the one that scales with your tunnel: the workstation has no
+route of its own, so every byte it installs crosses the VPN. A slow exit node
+shows up here and nowhere else. That is the entire point of enabling its egress
+only after the tunnel works.
+
+**Why it looks stuck.** Ansible prints a task's name and then nothing at all
+until that task finishes, so the longest steps are exactly the ones that show no
+output: `Install the standard Kali kernel`, the reboot handler after it, and — on
+a first-ever run — the image download before Ansible starts at all. Silence is
+normal; silence *plus an idle VM* is not.
+
+### Watching it
+
+Run the build so you can read it afterwards:
+
+```bash
+make up 2>&1 | tee build.log
+```
+
+Beware `| tail`: it buffers everything until the command ends, so you see nothing
+while it runs. `tee` does not.
+
+From another terminal:
+
+```bash
+make status                 # are both VMs actually running
+make console gateway        # serial console: real boot output, works on any kernel
+```
+
+Or ask the gateway how far it has got — these flip on in this order:
+
+```bash
+make ssh gateway
+systemctl is-active nftables wg-quick@wg0 unbound
+sudo wg show wg0 latest-handshakes     # non-zero means the tunnel is really up
+```
+
+### When it is genuinely stuck
+
+A task that sits for more than a few minutes while the VM is idle is a bug, not
+patience. The build reconfigures the network underneath its own SSH connection,
+so a rule that stops covering the management path drops both the replies *and*
+the RST — the control node is never told, and `make up` would hang indefinitely.
+That is why `ansible.cfg` sets `ServerAliveInterval`: a connection that has truly
+stopped answering now fails the run in about two minutes with a real error
+instead of hanging. Both known instances of this are written up in the comments
+at `ansible/roles/gateway/templates/nftables.conf.j2` and `ansible.cfg`.
+
 ## Commands
 
 ```bash
