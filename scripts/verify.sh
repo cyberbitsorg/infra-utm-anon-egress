@@ -321,7 +321,25 @@ while read -r short role vm_idx; do
   # The trailing sentinel distinguishes "scanned, found nothing" from "the scan
   # never ran": an ssh failure prints nothing at all, which would otherwise be
   # indistinguishable from a clean host and would score as a pass.
+  #
+  # The sentinel alone is not enough, though: it is written with `;`, not `&&`,
+  # so it fires even if dpkg-query itself is missing from PATH or the package
+  # database is unreadable -- the pipeline emits nothing, the echo still runs,
+  # and that reads exactly like a clean host. `base-files` is added to the same
+  # dpkg-query invocation as a canary: it is present on every Debian/Kali
+  # install, so its absence from the output proves the query never really ran,
+  # not that the box happens to be clean. It is stripped out of the "found"
+  # list below before anything is reported.
+  #
+  # The awk filter is inverted rather than matching "installed" literally: a
+  # package interrupted mid-install sits in `unpacked` or `half-configured`
+  # with its files already on disk, and a filter that only recognizes the one
+  # steady-state string would wave that through. Only `not-installed` and
+  # `config-files` (purged, conffiles only) mean the package is genuinely not
+  # present; every other status means something landed on disk, including
+  # statuses nobody has thought to enumerate here.
   vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' \
+      base-files \
       mullvad-vpn \
       network-manager-openvpn network-manager-openvpn-gnome \
       network-manager-pptp network-manager-pptp-gnome \
@@ -329,13 +347,25 @@ while read -r short role vm_idx; do
       network-manager-openconnect network-manager-openconnect-gnome \
       network-manager-vpnc network-manager-vpnc-gnome \
       network-manager-fortisslvpn network-manager-fortisslvpn-gnome \
-      2>/dev/null | awk '\$2 == \"installed\" { printf \"%s \", \$1 }'; echo __vpnscan=done" \
+      2>/dev/null | awk '\$2 != \"not-installed\" && \$2 != \"config-files\" { printf \"%s \", \$1 }'; echo __vpnscan=done" \
       2>/dev/null | tr -d '\r' || true)"
   if ! grep -q '__vpnscan=done' <<<"$vpn_scan"; then
     note_fail "the VPN-client scan did not run on ${short}; cannot assert credentials are gateway-only"
   else
-    vpn_found="$(sed 's/__vpnscan=done//' <<<"$vpn_scan" | tr -s ' ' | sed 's/^ *//;s/ *$//')"
-    if [[ -n "$vpn_found" ]]; then
+    vpn_present="$(sed 's/__vpnscan=done//' <<<"$vpn_scan" | tr -s ' ' | sed 's/^ *//;s/ *$//')"
+    canary_seen=0
+    vpn_found=""
+    for pkg in $vpn_present; do
+      if [[ "$pkg" == "base-files" ]]; then
+        canary_seen=1
+      else
+        vpn_found="${vpn_found}${pkg} "
+      fi
+    done
+    vpn_found="${vpn_found% }"
+    if [[ "$canary_seen" -ne 1 ]]; then
+      note_fail "the VPN-client scan on ${short} did not observe its own canary package (base-files); dpkg-query may be missing or the package database unreadable, so credential-isolation cannot be asserted"
+    elif [[ -n "$vpn_found" ]]; then
       note_fail "${short} has VPN client package(s) installed, which an internal-only host must never have: ${vpn_found}"
     else
       ok "${short} has no VPN client installed (credentials stay on the gateway)"
