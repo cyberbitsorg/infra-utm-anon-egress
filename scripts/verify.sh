@@ -123,6 +123,28 @@ py_on_ws() {
   on_ws "$ip" "python3 -c \"import base64;exec(base64.b64decode('${b64}'))\""
 }
 
+# vpn_pkg_status <dump> <package>: prints the db:Status-Status field dpkg-query
+# reported for <package> in a "Package Status\n"-per-line <dump>, or empty if
+# <package> never appears in it. Matched by exact field equality, never a
+# substring or pattern, so one package name can never be spoofed by another.
+vpn_pkg_status() {
+  awk -v p="$2" '$1 == p { s = $2 } END { print s }' <<<"$1"
+}
+
+# vpn_pkg_present <dump> <package>: true if <package>'s status is anything
+# OTHER than not-installed or config-files -- i.e. something of it landed on
+# disk, whatever mid-install or purge-adjacent state it is otherwise sitting
+# in. Inverted rather than matching "installed" literally: a package
+# interrupted mid-install sits in `unpacked` or `half-configured` with its
+# files already there, and a filter that only recognizes the one steady-state
+# string would wave that straight through. A status nobody here has thought to
+# enumerate therefore fails safe (counts as present) instead of passing.
+vpn_pkg_present() {
+  local s
+  s="$(vpn_pkg_status "$1" "$2")"
+  [[ -n "$s" && "$s" != "not-installed" && "$s" != "config-files" ]]
+}
+
 # dns_udp_probe <resolver> [qname] [timeout]
 #
 # Sends a real DNS query over UDP and prints the response code, or TIMEOUT.
@@ -322,53 +344,66 @@ while read -r short role vm_idx; do
   # never ran": an ssh failure prints nothing at all, which would otherwise be
   # indistinguishable from a clean host and would score as a pass.
   #
-  # The sentinel alone is not enough, though: it is written with `;`, not `&&`,
-  # so it fires even if dpkg-query itself is missing from PATH or the package
-  # database is unreadable -- the pipeline emits nothing, the echo still runs,
-  # and that reads exactly like a clean host. `base-files` is added to the same
-  # dpkg-query invocation as a canary: it is present on every Debian/Kali
-  # install, so its absence from the output proves the query never really ran,
-  # not that the box happens to be clean. It is stripped out of the "found"
-  # list below before anything is reported.
+  # Three independent faults are guarded here, and none of them may be inferred
+  # from either of the others:
+  #   - transport failure (ssh/the jump never delivered the command at all) --
+  #     caught by the `__vpnscan=done` sentinel, unconditional because it is
+  #     written after `;`, not `&&`.
+  #   - dpkg-query never ran (missing binary, unreadable status DB) -- caught
+  #     by requiring `base-files`, present on every Debian/Kali install, to
+  #     show up in the dump with a real status.
+  #   - dpkg-query STARTED but died partway through (crash, OOM, a resource
+  #     limit) -- the pipe still closes cleanly and the unconditional sentinel
+  #     still fires, so neither of the above two faults would catch it.
+  #     `base-files` cannot be pinned to "ran to completion" either by putting
+  #     it first in the argument list: dpkg-query iterates its status database
+  #     in alphabetical order regardless of argv order, so it is always
+  #     emitted early no matter where it is asked for -- argument position is
+  #     not a lever here. This is why the dump below takes NO package
+  #     arguments at all and is filtered locally instead: with nothing named on
+  #     the command line there is nothing that can be "not found", so
+  #     dpkg-query's own exit status becomes meaningful again, captured
+  #     immediately afterwards (nothing piped in between) as `__rc=$?`. Only
+  #     `__rc=0` counts as a completed run.
   #
-  # The awk filter is inverted rather than matching "installed" literally: a
-  # package interrupted mid-install sits in `unpacked` or `half-configured`
-  # with its files already on disk, and a filter that only recognizes the one
-  # steady-state string would wave that through. Only `not-installed` and
-  # `config-files` (purged, conffiles only) mean the package is genuinely not
-  # present; every other status means something landed on disk, including
-  # statuses nobody has thought to enumerate here.
-  vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' \
-      base-files \
-      mullvad-vpn \
+  # Filtering locally, in this shell, rather than through an awk pipeline sent
+  # over ssh also means every package name is matched by exact field equality
+  # against dpkg's own output -- never a substring or a pattern -- so one
+  # package name can never be spoofed by another.
+  vpn_watch_list="mullvad-vpn \
       network-manager-openvpn network-manager-openvpn-gnome \
       network-manager-pptp network-manager-pptp-gnome \
       network-manager-l2tp network-manager-l2tp-gnome \
       network-manager-openconnect network-manager-openconnect-gnome \
       network-manager-vpnc network-manager-vpnc-gnome \
-      network-manager-fortisslvpn network-manager-fortisslvpn-gnome \
-      2>/dev/null | awk '\$2 != \"not-installed\" && \$2 != \"config-files\" { printf \"%s \", \$1 }'; echo __vpnscan=done" \
+      network-manager-fortisslvpn network-manager-fortisslvpn-gnome"
+
+  vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' 2>/dev/null; echo __rc=\$?; echo __vpnscan=done" \
       2>/dev/null | tr -d '\r' || true)"
   if ! grep -q '__vpnscan=done' <<<"$vpn_scan"; then
     note_fail "the VPN-client scan did not run on ${short}; cannot assert credentials are gateway-only"
   else
-    vpn_present="$(sed 's/__vpnscan=done//' <<<"$vpn_scan" | tr -s ' ' | sed 's/^ *//;s/ *$//')"
-    canary_seen=0
-    vpn_found=""
-    for pkg in $vpn_present; do
-      if [[ "$pkg" == "base-files" ]]; then
-        canary_seen=1
-      else
-        vpn_found="${vpn_found}${pkg} "
-      fi
-    done
-    vpn_found="${vpn_found% }"
-    if [[ "$canary_seen" -ne 1 ]]; then
-      note_fail "the VPN-client scan on ${short} did not observe its own canary package (base-files); dpkg-query may be missing or the package database unreadable, so credential-isolation cannot be asserted"
-    elif [[ -n "$vpn_found" ]]; then
-      note_fail "${short} has VPN client package(s) installed, which an internal-only host must never have: ${vpn_found}"
+    vpn_rc="$(sed -n 's/^__rc=\([0-9][0-9]*\)$/\1/p' <<<"$vpn_scan" | tail -1 || true)"
+    # grep -v exits 1, not 0, when every line matches the exclusion (i.e. the
+    # dump has nothing left in it but the two marker lines) -- exactly the
+    # fault case this code exists to handle, so it must not be allowed to trip
+    # `set -e` and abort the whole run.
+    vpn_dump="$(grep -vE '^__rc=[0-9]+$|^__vpnscan=done$' <<<"$vpn_scan" || true)"
+    if [[ "$vpn_rc" != "0" ]]; then
+      note_fail "the VPN-client scan on ${short} did not complete (dpkg-query exited ${vpn_rc:-unknown} instead of 0); credential-isolation cannot be asserted"
+    elif ! vpn_pkg_present "$vpn_dump" "base-files"; then
+      note_fail "the VPN-client scan on ${short} did not observe its own canary package (base-files) as installed; dpkg-query may not have actually read the status database, so credential-isolation cannot be asserted"
     else
-      ok "${short} has no VPN client installed (credentials stay on the gateway)"
+      vpn_found=""
+      for pkg in $vpn_watch_list; do
+        vpn_pkg_present "$vpn_dump" "$pkg" && vpn_found="${vpn_found}${pkg} "
+      done
+      vpn_found="${vpn_found% }"
+      if [[ -n "$vpn_found" ]]; then
+        note_fail "${short} has VPN client package(s) installed, which an internal-only host must never have: ${vpn_found}"
+      else
+        ok "${short} has no VPN client installed (credentials stay on the gateway)"
+      fi
     fi
   fi
 
