@@ -22,6 +22,13 @@ id_ed25519.pub
 .vault_pass
 secrets/*
 !secrets/.gitkeep
+# Same belt-and-braces as .env above. `secrets/*` does NOT cover a sibling copy,
+# and a directory of WireGuard configs is exactly the thing an operator makes a
+# quick backup of before regenerating keys. secrets_bu/ was found untracked and
+# committable during the multihop work; any secrets* variant is now ignored.
+secrets*/
+!secrets/
+*.conf.singlehop.bak
 
 # Logs
 *.log
