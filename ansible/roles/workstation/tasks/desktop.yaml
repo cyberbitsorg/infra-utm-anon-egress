@@ -228,3 +228,73 @@
     name: lightdm
     enabled: true
     state: started
+
+- name: Install Mullvad's repository signing key
+  # Fetched through the tunnel, like everything else on this host.
+  #
+  # Stored as an ASCII-armoured file under /usr/share/keyrings and referenced by
+  # `signed-by=` below. NEVER apt-key: it is deprecated and, worse, it trusts the
+  # key for EVERY repository on the host, so a compromise of Mullvad's key would
+  # let it sign packages claiming to be Kali's.
+  #
+  # Key fingerprint at the time of writing, recorded so a silent rotation shows up
+  # in a diff rather than passing unnoticed:
+  #   A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF (rsa4096, uid "Mullvad (code
+  #   signing) <admin@mullvad.net>")
+  # Verify with:
+  #   gpg --show-keys /usr/share/keyrings/mullvad-keyring.asc
+  # and update this comment (and investigate) if it ever differs.
+  ansible.builtin.get_url:
+    url: https://repository.mullvad.net/deb/mullvad-keyring.asc
+    dest: /usr/share/keyrings/mullvad-keyring.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Refuse to install any Mullvad VPN client here
+  # Written BEFORE the repository is added, so there is never a moment in which
+  # `mullvad-vpn` is installable on this host.
+  #
+  # Mullvad's arm64 repository carries mullvad-vpn alongside the browser. This
+  # host must never hold VPN credentials -- that is the repo's central invariant
+  # -- so the package is pinned to -1, which makes apt refuse it even when asked
+  # for it by name. scripts/verify.sh asserts it stays absent.
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/99-anon-egress-no-vpn-client
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role: workstation).
+      # The workstation never runs a VPN client: the gateway is the anonymity
+      # layer, and credentials live only there.
+      Package: mullvad-vpn
+      Pin: origin *
+      Pin-Priority: -1
+
+- name: Add Mullvad's apt repository
+  # arch=arm64 keeps apt from asking this repo about foreign architectures, and
+  # signed-by scopes the key to this repository alone.
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/mullvad.list
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role: workstation).
+      deb [arch=arm64 signed-by=/usr/share/keyrings/mullvad-keyring.asc] https://repository.mullvad.net/deb/stable stable main
+
+- name: Install Mullvad Browser
+  # The ALPHA package, and not by preference: Mullvad publishes stable
+  # mullvad-browser for amd64 only. Verified against
+  # https://repository.mullvad.net/deb/stable/dists/stable/main/binary-arm64/Packages,
+  # which lists exactly two packages -- mullvad-browser-alpha and mullvad-vpn.
+  #
+  # It is worth the alpha channel: the browser fingerprint is what the tunnel
+  # cannot hide, and Mullvad Browser's value is that every user of it looks the
+  # same. A hand-hardened Firefox would be MORE identifiable, not less, which is
+  # why the obvious "just use the stable distro browser" is the wrong trade here.
+  ansible.builtin.apt:
+    name: mullvad-browser-alpha
+    state: present
+    update_cache: true
