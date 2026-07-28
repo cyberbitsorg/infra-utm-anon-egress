@@ -1,13 +1,19 @@
 ---
 # The Kali XFCE desktop and Mullvad Browser.
 #
-# ORDER IN THIS FILE IS LOAD-BEARING. The NetworkManager configuration is written
-# BEFORE the desktop is installed, because kali-desktop-xfce hard-depends on
+# ORDER IN THIS FILE IS LOAD-BEARING, and the rule is one rule: every drop-in
+# that overrides a packaged default is written BEFORE the package that ships it.
+#
+# The NetworkManager configuration, because kali-desktop-xfce hard-depends on
 # network-manager-gnome: install first and there is a window in which
 # NetworkManager starts, claims this host's only NIC, and rewrites
 # /etc/resolv.conf -- which silently destroys the tunnel-only DNS that Phase 2
 # exists to provide. Writing the config first means the daemon has never managed
 # anything, not even for a second.
+#
+# The lightdm no-autologin drop-in, for the same reason: lightdm's postinst
+# enables and starts the display manager during the install, so a drop-in
+# written afterwards leaves the packaged default in force for the length of it.
 
 - name: Fail clearly if the desktop is enabled without egress
   # apt would otherwise fail deep inside a mirror timeout, which reads as a broken
@@ -28,8 +34,10 @@
     msg: >-
       workstation_desktop is enabled but workstation_console_password is empty.
       cloud-init locks the account, so lightdm would present a greeter no password
-      can pass. Set WORKSTATION_CONSOLE_PASSWORD in .env (make preflight generates
-      one), or turn the desktop back off.
+      can pass. Put a value on the WORKSTATION_CONSOLE_PASSWORD line of your
+      existing .env, then re-run. (`make preflight` will NOT do this for you: it
+      only ever generates passwords when .env does not exist yet, and anyone
+      reading this message necessarily has one.) Or turn the desktop back off.
   when:
     - workstation_desktop | default(false) | bool
     - (workstation_console_password | default('')) | length == 0
@@ -99,6 +107,19 @@
   # cloud-init/netplan and never changes, so there is nothing for NetworkManager
   # to usefully do with it.
   #
+  # connectivity.enabled=false is the third. Debian's network-manager ships
+  # /usr/lib/NetworkManager/conf.d/20-connectivity-debian.conf, which points the
+  # connectivity checker at http://network-test.debian.org/nm; it sorts before
+  # this file and sets a key this file otherwise leaves alone, so it survives the
+  # merge intact. To be precise about the risk: that probe is NOT an IP leak.
+  # This host has exactly one route and it is the gateway's, so the request would
+  # travel through the tunnel like everything else. What it would be is a
+  # recurring, unauthenticated, distinctively-shaped beacon announcing "a Debian
+  # NetworkManager lives behind this exit IP" on a schedule -- a fingerprint and
+  # a piece of traffic pattern, on the one host whose job is to be
+  # indistinguishable. There is nothing to gain from the check either: with every
+  # device unmanaged, NM has no connection whose state it could usefully change.
+  #
   # Filename is prefixed 99-, not 00-. NetworkManager reads
   # /etc/NetworkManager/conf.d/*.conf in ALPHABETICAL order and, for a plain key
   # assignment, the LAST file read wins -- later files override earlier ones. A
@@ -123,57 +144,14 @@
       [keyfile]
       unmanaged-devices=interface-name:{{ anon_ws_if }}
 
-- name: Install the Kali XFCE desktop
-  # WITH recommends, deliberately. Measured on this image: 951 packages with
-  # recommends versus 537 without. The 414 extra are fonts, codecs and utilities
-  # that make the desktop feel complete -- a desktop metapackage installed without
-  # its Recommends is subtly broken in ways that are tedious to chase later.
-  #
-  # The cost is that recommends ALSO pull ten NetworkManager VPN plugins, which
-  # the next task purges. They are Recommends and not Depends, so removing them
-  # cannot cascade into removing the desktop.
-  #
-  # This is the longest single operation in the repo: ~951 packages, every byte of
-  # it through the WireGuard tunnel. Expect many minutes with no output. The SSH
-  # keepalives configured in ansible.cfg are what keep this from looking like a
-  # hang; they are answered at the transport layer while apt works.
-  #
-  # No cache_valid_time: a FAILED apt update still refreshes the timestamp, and
-  # the next hour of retries would then skip the update and report the useless
-  # "No package matching 'kali-desktop-xfce' is available".
-  ansible.builtin.apt:
-    name: kali-desktop-xfce
-    state: present
-    install_recommends: true
-    update_cache: true
-
-- name: Purge the NetworkManager VPN plugins
-  # A GUI "add a VPN connection" wizard on the one host that must never hold VPN
-  # credentials is an invitation to break the design by hand. These are Recommends
-  # of the desktop, so purging them leaves the desktop fully intact.
-  #
-  # Idempotent by construction: `state: absent` on an already-absent package is a
-  # no-op, so this reports no change on every run after the first.
-  # scripts/verify.sh asserts the same list stays absent, which is what catches a
-  # future dist-upgrade re-satisfying the Recommends.
-  ansible.builtin.apt:
-    name:
-      - network-manager-openvpn
-      - network-manager-openvpn-gnome
-      - network-manager-pptp
-      - network-manager-pptp-gnome
-      - network-manager-l2tp
-      - network-manager-l2tp-gnome
-      - network-manager-openconnect
-      - network-manager-openconnect-gnome
-      - network-manager-vpnc
-      - network-manager-vpnc-gnome
-      - network-manager-fortisslvpn
-      - network-manager-fortisslvpn-gnome
-    state: absent
-    purge: true
+      [connectivity]
+      enabled=false
 
 - name: Ensure the lightdm config directory exists
+  # Created BEFORE lightdm exists, for the same reason as the NetworkManager
+  # directory above: the drop-in has to be on disk before the package that would
+  # otherwise decide the question. An empty /etc/lightdm/lightdm.conf.d on a host
+  # with no display manager is inert.
   ansible.builtin.file:
     path: /etc/lightdm/lightdm.conf.d
     state: directory
@@ -191,6 +169,14 @@
   # default is Kali's to change and this is a property we depend on. The empty
   # autologin-user overrides anything set in /etc/lightdm/lightdm.conf: files in
   # lightdm.conf.d are read after it, and 99- sorts last.
+  #
+  # ORDER IS LOAD-BEARING, exactly as it is for the NetworkManager drop-in: this
+  # must be written BEFORE kali-desktop-xfce, because lightdm's postinst enables
+  # and starts the display manager as part of the install. Written afterwards,
+  # the packaged default IS the live configuration for the length of that install
+  # -- and permanently, on any run where the install succeeds and this task does
+  # not. "Refuses to trust the packaged default" has to be true of the ordering
+  # as well as of the file.
   ansible.builtin.copy:
     dest: /etc/lightdm/lightdm.conf.d/99-anon-egress-no-autologin.conf
     owner: root
@@ -201,6 +187,70 @@
       [Seat:*]
       autologin-user=
       autologin-user-timeout=0
+
+- name: Install the Kali XFCE desktop
+  # WITH recommends, deliberately. Measured on this image: 951 packages with
+  # recommends versus 537 without. The 414 extra are fonts, codecs and utilities
+  # that make the desktop feel complete -- a desktop metapackage installed without
+  # its Recommends is subtly broken in ways that are tedious to chase later.
+  #
+  # The cost is that recommends ALSO pull in NetworkManager VPN plugins, which
+  # the next task purges. No count is given here on purpose: the number is Kali's
+  # to change between releases, and a stale one in a comment reads as an
+  # assurance that the list below is complete. It is not, which is why
+  # scripts/verify.sh matches network-manager-* by pattern and not only by name.
+  # They are Recommends and not Depends, so removing them cannot cascade into
+  # removing the desktop.
+  #
+  # This is the longest single operation in the repo: ~951 packages, every byte of
+  # it through the WireGuard tunnel. Expect many minutes with no output. The SSH
+  # keepalives configured in ansible.cfg are what keep this from looking like a
+  # hang; they are answered at the transport layer while apt works.
+  #
+  # No cache_valid_time: a FAILED apt update still refreshes the timestamp, and
+  # the next hour of retries would then skip the update and report the useless
+  # "No package matching 'kali-desktop-xfce' is available".
+  ansible.builtin.apt:
+    name: kali-desktop-xfce
+    state: present
+    install_recommends: true
+    update_cache: true
+
+- name: Purge the NetworkManager VPN plugins and the clients behind them
+  # A GUI "add a VPN connection" wizard on the one host that must never hold VPN
+  # credentials is an invitation to break the design by hand. These are Recommends
+  # of the desktop, so purging them leaves the desktop fully intact.
+  #
+  # openvpn is in the list because removing a plugin does NOT remove the client
+  # it depended on: apt leaves the now-orphaned package installed unless someone
+  # runs autoremove. Measured on this guest -- with every plugin below already
+  # purged, /usr/sbin/openvpn was still there, a complete and working VPN client
+  # on the host the whole repo exists to keep credential-free. `apt-get -s purge
+  # openvpn` removes openvpn and nothing else (no installed reverse
+  # dependencies), so this cannot cascade into the desktop either.
+  #
+  # Idempotent by construction: `state: absent` on an already-absent package is a
+  # no-op, so this reports no change on every run after the first.
+  # scripts/verify.sh asserts these stay absent -- and, unlike this list, matches
+  # network-manager-* by pattern, so a plugin a future Kali adds is caught even
+  # though nothing here purged it.
+  ansible.builtin.apt:
+    name:
+      - openvpn
+      - network-manager-openvpn
+      - network-manager-openvpn-gnome
+      - network-manager-pptp
+      - network-manager-pptp-gnome
+      - network-manager-l2tp
+      - network-manager-l2tp-gnome
+      - network-manager-openconnect
+      - network-manager-openconnect-gnome
+      - network-manager-vpnc
+      - network-manager-vpnc-gnome
+      - network-manager-fortisslvpn
+      - network-manager-fortisslvpn-gnome
+    state: absent
+    purge: true
 
 - name: Read the current default systemd target
   ansible.builtin.command: systemctl get-default
@@ -237,19 +287,53 @@
   # key for EVERY repository on the host, so a compromise of Mullvad's key would
   # let it sign packages claiming to be Kali's.
   #
-  # Key fingerprint at the time of writing, recorded so a silent rotation shows up
-  # in a diff rather than passing unnoticed:
-  #   A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF (rsa4096, uid "Mullvad (code
-  #   signing) <admin@mullvad.net>")
-  # Verify with:
-  #   gpg --show-keys /usr/share/keyrings/mullvad-keyring.asc
-  # and update this comment (and investigate) if it ever differs.
+  # The expected fingerprint is NOT recorded in a comment -- the two tasks below
+  # check it. A comment saying "a rotation would show up in a diff" is false
+  # unless something compares, and on this repo's normal workflow (destroy and
+  # rebuild) the file does not exist beforehand, so every build would otherwise
+  # blind-fetch whatever the URL serves and trust it immediately.
+  #
+  # Deliberately NOT a `checksum:` on this get_url: Mullvad re-armouring the same
+  # key, or adding a second signing subkey, changes the file's digest without
+  # changing who is trusted, and that would break every build for no security
+  # reason. The check below asserts the thing that matters -- that the key we
+  # decided to trust is in the keyring -- and tolerates the things that do not.
   ansible.builtin.get_url:
     url: https://repository.mullvad.net/deb/mullvad-keyring.asc
     dest: /usr/share/keyrings/mullvad-keyring.asc
     owner: root
     group: root
     mode: "0644"
+
+- name: Read the fingerprints in Mullvad's keyring
+  ansible.builtin.command:
+    cmd: gpg --show-keys --with-colons /usr/share/keyrings/mullvad-keyring.asc
+  register: anon_mullvad_keyring
+  changed_when: false
+
+- name: Fail if Mullvad's signing key is not the one this role decided to trust
+  # PRESENCE, not an exact key list. The keyring legitimately carries more than
+  # one key (three at the time of writing), and Mullvad may add another without
+  # that meaning anything is wrong -- but the one below disappearing, or being
+  # replaced, is a repository takeover until proven otherwise.
+  #
+  # Matched between colons so it must be a whole field of gpg's --with-colons
+  # record rather than a substring that happens to appear somewhere.
+  ansible.builtin.assert:
+    that:
+      - "':' ~ anon_mullvad_key_fpr ~ ':' in anon_mullvad_keyring.stdout"
+    fail_msg: >-
+      /usr/share/keyrings/mullvad-keyring.asc does NOT contain
+      {{ anon_mullvad_key_fpr }}, the key this role trusts to sign Mullvad
+      Browser. Do not "fix" this by updating the constant. Fetch the key
+      yourself, compare its fingerprint against the one Mullvad publishes at
+      https://mullvad.net/en/help/verifying-installer-signatures, and only once
+      the new key checks out replace anon_mullvad_key_fpr in this file. Until
+      then, treat the repository as compromised.
+    success_msg: "Mullvad's keyring still contains {{ anon_mullvad_key_fpr }}"
+  vars:
+    # rsa4096, uid "Mullvad (code signing) <admin@mullvad.net>".
+    anon_mullvad_key_fpr: A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF
 
 - name: Refuse to install any Mullvad VPN client here
   # Written BEFORE the repository is added, so there is never a moment in which
@@ -258,7 +342,8 @@
   # Mullvad's arm64 repository carries mullvad-vpn alongside the browser. This
   # host must never hold VPN credentials -- that is the repo's central invariant
   # -- so the package is pinned to -1, which makes apt refuse it even when asked
-  # for it by name. scripts/verify.sh asserts it stays absent.
+  # for it by name. scripts/verify.sh asserts it stays ABSENT; the last task in
+  # this file asserts this pin is what is keeping it that way.
   ansible.builtin.copy:
     dest: /etc/apt/preferences.d/99-anon-egress-no-vpn-client
     owner: root
@@ -298,3 +383,47 @@
     name: mullvad-browser-alpha
     state: present
     update_cache: true
+
+- name: Assert apt really does refuse the Mullvad VPN client
+  # Runs last, once the repository is added and the cache has been refreshed by
+  # the task above, because a pin can only be tested against a repository apt has
+  # actually read.
+  #
+  # Why this exists at all: verify.sh asserts only that mullvad-vpn is ABSENT,
+  # which is exactly as true on a host where the pin is dead and nobody happened
+  # to type `apt install mullvad-vpn`. That is the package-management form of
+  # scoring silence as security. If a future apt changes how `Pin: origin`
+  # matches, this build must break loudly here rather than quietly hand the one
+  # credential-free host in the design an installable VPN client.
+  #
+  # TWO conditions, and both are needed. "Nothing offers it at a usable priority"
+  # is vacuously true when apt cannot see the package at all -- a repository that
+  # failed to refresh would score as a working pin -- so the package must first
+  # be VISIBLE in the version table, and only then is its priority allowed to
+  # decide. The simulated install is the behavioural half: it asks apt the exact
+  # question an operator would.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    policy="$(apt-cache policy mullvad-vpn)"
+    printf '%s\n' "$policy" | grep -q 'Version table:' || {
+      echo "apt cannot see mullvad-vpn at all; the pin is untested, not proven"
+      printf '%s\n' "$policy"
+      exit 1
+    }
+    # Version lines sit under "Version table:" at a shallower indent than the
+    # origin lines beneath them, and carry the priority as their last field.
+    usable="$(printf '%s\n' "$policy" | awk '
+      /Version table:/ { v = 1; next }
+      v && /^        / { next }
+      v && NF && $NF !~ /^-/ { print $NF }')"
+    [ -z "$usable" ] || {
+      echo "mullvad-vpn is offered at non-negative priority: ${usable}"
+      exit 1
+    }
+    ! apt-get -s install mullvad-vpn >/dev/null 2>&1 || {
+      echo "apt-get would install mullvad-vpn despite the pin"
+      exit 1
+    }
+  args:
+    executable: /bin/bash
+  changed_when: false
