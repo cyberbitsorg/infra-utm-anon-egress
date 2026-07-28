@@ -62,6 +62,7 @@ test: ## Run the shell unit tests (no UTM needed)
 	@bash tests/ssh-jump.sh
 	@bash tests/secret-vars.sh
 	@bash tests/wg-config.sh
+	@bash tests/vpn-pkg-scan.sh
 
 lint: ## Syntax-check scripts and Ansible
 	@bash -n scripts/*.sh tests/*.sh && echo "shell OK"

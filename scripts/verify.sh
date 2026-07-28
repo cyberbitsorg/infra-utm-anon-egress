@@ -127,8 +127,22 @@ py_on_ws() {
 # reported for <package> in a "Package Status\n"-per-line <dump>, or empty if
 # <package> never appears in it. Matched by exact field equality, never a
 # substring or pattern, so one package name can never be spoofed by another.
+#
+# Where the dump holds MORE THAN ONE record for the same name -- dpkg emits one
+# per architecture, and keeps a not-installed stanza for every package it has
+# ever known -- the record that counts as PRESENT wins, and the last record
+# decides only when no record does. Keeping "whichever sorted last" instead
+# (`$1 == p { s = $2 }`) resolves an ambiguous input toward "pass": a trailing
+# not-installed stanza masks a genuinely installed one and the host is reported
+# clean. That is the opposite of what this function is for.
 vpn_pkg_status() {
-  awk -v p="$2" '$1 == p { s = $2 } END { print s }' <<<"$1"
+  awk -v p="$2" '
+    $1 == p {
+      if ($2 != "not-installed" && $2 != "config-files") { print $2; found = 1; exit }
+      last = $2
+    }
+    END { if (!found && last != "") print last }
+  ' <<<"$1"
 }
 
 # vpn_pkg_present <dump> <package>: true if <package>'s status is anything
@@ -143,6 +157,31 @@ vpn_pkg_present() {
   local s
   s="$(vpn_pkg_status "$1" "$2")"
   [[ -n "$s" && "$s" != "not-installed" && "$s" != "config-files" ]]
+}
+
+# vpn_nm_plugins <dump>: prints every INSTALLED network-manager-* package in
+# <dump> that is not one of the three the desktop legitimately needs.
+#
+# This is the open-ended half of the VPN-client check, and the reason its green
+# message is allowed to say "no VPN client" rather than "none of the fourteen I
+# know about". A hand-written list can only ever name the plugins that existed
+# when it was written: a plugin a future Kali adds to the desktop's Recommends,
+# or one the operator apt-installs from the desktop's own terminal, is neither
+# purged by the role nor named here -- and the whole enumeration would then keep
+# printing green over a working OpenVPN GUI. Every NetworkManager VPN plugin is
+# named network-manager-<protocol>[-gnome] by Debian policy, so the pattern
+# catches the ones nobody has thought of yet.
+#
+# `network-manager` itself does not match (no trailing dash); the applet and the
+# GTK front-end do, and are the only two exclusions -- both are pulled in by
+# kali-desktop-xfce and neither can dial a VPN. Anything else that matches is
+# reported, and an over-broad match here costs a build failure with the package
+# name printed, which is the cheap direction to be wrong in.
+vpn_nm_plugins() {
+  awk '$1 ~ /^network-manager-/ \
+       && $1 != "network-manager-applet" && $1 != "network-manager-gnome" \
+       && $2 != "not-installed" && $2 != "config-files" { print $1 }' <<<"$1" \
+    | sort -u || true
 }
 
 # dns_udp_probe <resolver> [qname] [timeout]
@@ -335,10 +374,18 @@ while read -r short role vm_idx; do
   #
   # It guards two real drift paths. The Mullvad repo added for the browser also
   # carries `mullvad-vpn` for arm64 (an apt pin blocks it, and this catches the
-  # pin being removed). And the Kali desktop RECOMMENDS ten NetworkManager VPN
-  # plugins, which are purged at install time -- but a later dist-upgrade can
+  # pin being removed). And the Kali desktop RECOMMENDS a set of NetworkManager
+  # VPN plugins, which are purged at install time -- but a later dist-upgrade can
   # re-satisfy a Recommends and quietly put an OpenVPN GUI back on the machine
   # months after anyone last looked.
+  #
+  # The named list below is NOT the whole check, and must not be: it is a closed
+  # enumeration, while the message printed on success ("no VPN client installed")
+  # is an open-ended claim. vpn_nm_plugins closes that gap for the plugins by
+  # matching network-manager-* as a pattern; the standalone clients at the end of
+  # the list close the other obvious route, which is that this host now has a
+  # desktop, a terminal and full apt access through the tunnel, so `apt install
+  # openvpn` is one command away from anyone sitting at it.
   #
   # The trailing sentinel distinguishes "scanned, found nothing" from "the scan
   # never ran": an ssh failure prints nothing at all, which would otherwise be
@@ -367,16 +414,18 @@ while read -r short role vm_idx; do
   #     `__rc=0` counts as a completed run.
   #
   # Filtering locally, in this shell, rather than through an awk pipeline sent
-  # over ssh also means every package name is matched by exact field equality
-  # against dpkg's own output -- never a substring or a pattern -- so one
-  # package name can never be spoofed by another.
+  # over ssh also means every NAMED package below is matched by exact field
+  # equality against dpkg's own output -- never a substring -- so one package
+  # name can never be spoofed by another. The single deliberate exception is
+  # vpn_nm_plugins, which is a prefix match by design and errs toward reporting.
   vpn_watch_list="mullvad-vpn \
       network-manager-openvpn network-manager-openvpn-gnome \
       network-manager-pptp network-manager-pptp-gnome \
       network-manager-l2tp network-manager-l2tp-gnome \
       network-manager-openconnect network-manager-openconnect-gnome \
       network-manager-vpnc network-manager-vpnc-gnome \
-      network-manager-fortisslvpn network-manager-fortisslvpn-gnome"
+      network-manager-fortisslvpn network-manager-fortisslvpn-gnome \
+      openvpn wireguard wireguard-tools strongswan"
 
   vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' 2>/dev/null; echo __rc=\$?; echo __vpnscan=done" \
       2>/dev/null | tr -d '\r' || true)"
@@ -398,11 +447,21 @@ while read -r short role vm_idx; do
       for pkg in $vpn_watch_list; do
         vpn_pkg_present "$vpn_dump" "$pkg" && vpn_found="${vpn_found}${pkg} "
       done
+      # ...and then the same dump again, by pattern, for the plugins no list can
+      # know about. No extra round trip: the full dump is already here. The
+      # dedupe keeps a package that is both named above and matched here from
+      # being reported twice.
+      for pkg in $(vpn_nm_plugins "$vpn_dump"); do
+        case " ${vpn_found}" in
+          *" ${pkg} "*) continue ;;
+        esac
+        vpn_found="${vpn_found}${pkg} "
+      done
       vpn_found="${vpn_found% }"
       if [[ -n "$vpn_found" ]]; then
         note_fail "${short} has VPN client package(s) installed, which an internal-only host must never have: ${vpn_found}"
       else
-        ok "${short} has no VPN client installed (credentials stay on the gateway)"
+        ok "${short} has no VPN client installed: none of the named clients, and no network-manager-* plugin beyond the desktop's own (credentials stay on the gateway)"
       fi
     fi
   fi
