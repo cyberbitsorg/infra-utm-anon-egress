@@ -110,3 +110,11 @@
   changed_when: false
   no_log: true
   when: (workstation_console_password | default('')) | length > 0
+
+# MUST come after the console-kernel block: a desktop needs the framebuffer that
+# the standard (non-cloud) kernel provides, and an XFCE greeter has nothing to
+# draw on under the driver-less cloud kernel.
+- name: Configure the desktop
+  ansible.builtin.include_tasks: desktop.yaml
+  when: workstation_desktop | default(false) | bool
+  tags: [desktop]

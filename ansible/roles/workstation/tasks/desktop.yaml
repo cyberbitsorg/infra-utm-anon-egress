@@ -1,0 +1,100 @@
+---
+# The Kali XFCE desktop and Mullvad Browser.
+#
+# ORDER IN THIS FILE IS LOAD-BEARING. The NetworkManager configuration is written
+# BEFORE the desktop is installed, because kali-desktop-xfce hard-depends on
+# network-manager-gnome: install first and there is a window in which
+# NetworkManager starts, claims this host's only NIC, and rewrites
+# /etc/resolv.conf -- which silently destroys the tunnel-only DNS that Phase 2
+# exists to provide. Writing the config first means the daemon has never managed
+# anything, not even for a second.
+
+- name: Fail clearly if the desktop is enabled without egress
+  # apt would otherwise fail deep inside a mirror timeout, which reads as a broken
+  # playbook rather than "you enabled this before the gateway could carry it".
+  ansible.builtin.fail:
+    msg: >-
+      workstation_desktop is enabled but this host cannot reach a package mirror.
+      It has no NAT NIC by design; the gateway must forward its traffic through
+      the tunnel first. Set workstation_has_egress, or turn the desktop back off.
+  when:
+    - workstation_desktop | default(false) | bool
+    - not workstation_has_egress | default(false) | bool
+
+- name: Fail clearly if the desktop is enabled without a console password
+  # A graphical greeter on an account cloud-init locked cannot be logged into at
+  # all. Better to say so now than after installing 951 packages over a VPN.
+  ansible.builtin.fail:
+    msg: >-
+      workstation_desktop is enabled but workstation_console_password is empty.
+      cloud-init locks the account, so lightdm would present a greeter no password
+      can pass. Set WORKSTATION_CONSOLE_PASSWORD in .env (make preflight generates
+      one), or turn the desktop back off.
+  when:
+    - workstation_desktop | default(false) | bool
+    - (workstation_console_password | default('')) | length == 0
+
+- name: Find the workstation's NIC (the one holding its segment address)
+  # Kept as a LIST and asserted below rather than narrowed with `| first`. A
+  # config that marks the WRONG device unmanaged reads perfectly and protects
+  # nothing -- the same failure mode the gateway's ruleset avoids by deriving its
+  # interfaces instead of hardcoding them.
+  ansible.builtin.set_fact:
+    anon_ws_if_candidates: >-
+      {{ ansible_facts.interfaces
+         | map('regex_replace', '^', '')
+         | select('ne', 'lo')
+         | map('extract', ansible_facts)
+         | selectattr('ipv4', 'defined')
+         | selectattr('ipv4.address', 'equalto', internal_ip)
+         | map(attribute='device') | list }}
+
+- name: Fail if the workstation's NIC could not be identified unambiguously
+  ansible.builtin.assert:
+    that:
+      - anon_ws_if_candidates | length == 1
+    fail_msg: >-
+      Expected EXACTLY ONE interface holding {{ internal_ip }}, found
+      {{ anon_ws_if_candidates }}. Refusing to write a NetworkManager exclusion
+      that might name the wrong device.
+
+- name: Name the workstation's NIC
+  ansible.builtin.set_fact:
+    anon_ws_if: "{{ anon_ws_if_candidates | first }}"
+
+- name: Ensure the NetworkManager config directory exists
+  # Created before the package, so the drop-in below is already in place the first
+  # time NetworkManager ever starts.
+  ansible.builtin.file:
+    path: /etc/NetworkManager/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Take NetworkManager's hands off the network
+  # NetworkManager is a hard dependency of kali-desktop-xfce, so it WILL be
+  # installed. It is not masked: with no managed device and no DNS control it can
+  # do no harm, and masking it only leaves a broken-looking applet on the desktop.
+  #
+  # dns=none is the important half. NetworkManager's default is to rewrite
+  # /etc/resolv.conf, which on this host points at the gateway's unbound and is
+  # the ONLY resolver permitted -- the gateway's forward chain drops :53 to
+  # anywhere else. If NetworkManager repointed it, DNS would break rather than
+  # leak, but the box would look inexplicably broken.
+  #
+  # unmanaged-devices is the other half: the NIC is statically configured by
+  # cloud-init/netplan and never changes, so there is nothing for NetworkManager
+  # to usefully do with it.
+  ansible.builtin.copy:
+    dest: /etc/NetworkManager/conf.d/00-anon-egress-unmanaged.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role: workstation).
+      [main]
+      dns=none
+
+      [keyfile]
+      unmanaged-devices=interface-name:{{ anon_ws_if }}
