@@ -111,9 +111,24 @@
   no_log: true
   when: (workstation_console_password | default('')) | length > 0
 
-# MUST come after the console-kernel block: a desktop needs the framebuffer that
-# the standard (non-cloud) kernel provides, and an XFCE greeter has nothing to
-# draw on under the driver-less cloud kernel.
+- name: Apply the pending kernel reboot before the desktop
+  # Handlers are PLAY-scoped: without this they run after the last task in the
+  # play, i.e. after the desktop include below has already finished. But the
+  # desktop's precondition is the RUNNING kernel, not the installed one -- the
+  # cloud kernel has no DRM driver, so on a cold build lightdm would be started
+  # with no framebuffer to open, respawn (Restart=always) until it burned
+  # systemd's start limit, and be left `failed` for the next `make configure` to
+  # trip over on `state: started`.
+  #
+  # No `when:` is possible here (meta tasks do not take one) and none is needed:
+  # with no handler queued -- every incremental run, where the kernel was
+  # installed and rebooted into long ago -- this flushes nothing and costs
+  # nothing.
+  ansible.builtin.meta: flush_handlers
+
+# MUST come after the console-kernel block AND after the flush above: a desktop
+# needs the framebuffer that the standard (non-cloud) kernel provides, and an
+# XFCE greeter has nothing to draw on under the driver-less cloud kernel.
 - name: Configure the desktop
   ansible.builtin.include_tasks: desktop.yaml
   when: workstation_desktop | default(false) | bool
