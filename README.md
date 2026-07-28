@@ -86,7 +86,16 @@ mechanism: destroy, then `make up` clones a fresh Kali from the base image.
 
 A full cold build — `make destroy`, then `make up` — was **measured at about
 3 minutes** end to end on an M-series Mac with the base images already
-downloaded. If yours takes noticeably longer, the two things that vary are named
+downloaded. That figure predates the workstation desktop and is now a floor
+rather than an estimate: `kali-desktop-xfce` pulls roughly 950 packages and
+Mullvad Browser on top of it, every byte over the VPN, and that one task now
+dominates the build. Re-measure on your own link with
+
+```bash
+make destroy && time make up 2>&1 | tee cold-build.log
+```
+
+If yours takes noticeably longer than that, the two things that vary are named
 below; if it takes *much* longer with an idle VM, see "When it is genuinely
 stuck".
 
@@ -100,7 +109,7 @@ What `make up` does, in order:
 | Provisioning | UTM creates and boots both VMs, then the build waits for SSH |
 | cloud-init | first boot: user, keys, static addressing |
 | Ansible — gateway | WireGuard, the kill-switch, unbound |
-| Ansible — workstation | packages **and a whole kernel, downloaded through the VPN**, then a reboot |
+| Ansible — workstation | packages, **a whole kernel, a 951-package desktop and a browser, all downloaded through the VPN**, then a reboot |
 
 The last row is the one that scales with your tunnel: the workstation has no
 route of its own, so every byte it installs crosses the VPN. A slow exit node
@@ -109,9 +118,10 @@ only after the tunnel works.
 
 **Why it looks stuck.** Ansible prints a task's name and then nothing at all
 until that task finishes, so the longest steps are exactly the ones that show no
-output: `Install the standard Kali kernel`, the reboot handler after it, and — on
-a first-ever run — the image download before Ansible starts at all. Silence is
-normal; silence *plus an idle VM* is not.
+output: `Install the standard Kali kernel`, `Install the Kali XFCE desktop`, the
+reboot handler after them, and — on a first-ever run — the image download before
+Ansible starts at all. The desktop task is the longest single silence in the
+build by a wide margin. Silence is normal; silence *plus an idle VM* is not.
 
 ### Watching it
 
@@ -346,8 +356,22 @@ without the egress fails immediately with an explanatory message instead of an a
 timeout. If you ever remove the tunnel, set `workstation_has_egress` back to
 `false` first.
 
-A desktop (Phase 3's Mullvad Browser needs one) depends on this having run: an
-XFCE greeter has nothing to draw on under the cloud kernel.
+The desktop itself sits on top of this. `kali-desktop-xfce` and Mullvad Browser
+are installed by the `workstation` role behind `workstation_desktop`, and log in
+through a `lightdm` greeter that deliberately **never** auto-logs in — the
+console password in `.env` is required, and the role refuses to run without it.
+
+Two things about that install are worth knowing:
+
+- It is by far the longest operation in the repo. 951 packages and a browser,
+  every byte through the VPN.
+- `kali-desktop-xfce` hard-depends on NetworkManager and recommends ten
+  NetworkManager VPN plugins. The plugins are purged and asserted absent by
+  `make verify`; NetworkManager itself is installed but configured with
+  `dns=none` and the workstation's NIC marked unmanaged, so it can neither take
+  the interface nor rewrite `/etc/resolv.conf`. A GUI VPN wizard on the one host
+  that must never hold VPN credentials is not a cosmetic concern, and neither is
+  a daemon that rewrites the resolver this design depends on.
 
 ### Serial console (works on both, any kernel)
 
