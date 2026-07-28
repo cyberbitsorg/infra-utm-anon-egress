@@ -216,27 +216,40 @@
     install_recommends: true
     update_cache: true
 
-- name: Purge the NetworkManager VPN plugins and the clients behind them
+- name: Purge the VPN plugins and every client behind them
   # A GUI "add a VPN connection" wizard on the one host that must never hold VPN
-  # credentials is an invitation to break the design by hand. These are Recommends
-  # of the desktop, so purging them leaves the desktop fully intact.
+  # credentials is an invitation to break the design by hand. The plugins are
+  # Recommends of the desktop, so purging them leaves the desktop fully intact.
   #
-  # openvpn is in the list because removing a plugin does NOT remove the client
-  # it depended on: apt leaves the now-orphaned package installed unless someone
-  # runs autoremove. Measured on this guest -- with every plugin below already
-  # purged, /usr/sbin/openvpn was still there, a complete and working VPN client
-  # on the host the whole repo exists to keep credential-free. `apt-get -s purge
-  # openvpn` removes openvpn and nothing else (no installed reverse
-  # dependencies), so this cannot cascade into the desktop either.
+  # THE SECOND HALF OF THIS LIST IS THE PART THAT IS EASY TO GET WRONG. Removing
+  # a NetworkManager plugin does NOT remove the client it depended on: apt leaves
+  # the orphan installed unless someone runs autoremove. That is not theoretical
+  # -- with every plugin below already purged, this guest was measured still
+  # carrying working /usr/sbin/openvpn, openconnect, vpnc and pptp binaries plus
+  # the strongswan IKE daemon. Purging the GUI while leaving the client behind
+  # removes the convenience and keeps the capability, which is the wrong half.
+  #
+  # Every name here was checked before being added, and none of them cascades:
+  # `apt-get -s purge` on the whole set removes exactly these ten packages and
+  # nothing else -- no kali-desktop-xfce, no lightdm, no network-manager, no
+  # Mullvad Browser. Re-run that simulation before adding to this list; if a
+  # package ever turns out to be load-bearing for XFCE, leave it installed and
+  # document it rather than breaking the desktop.
+  #
+  # Deliberately NOT `autoremove: true`. That would also drop ~30 unrelated
+  # orphans (easy-rsa, opensc, pcscd, libnl-3-200, assorted python3 modules) and
+  # make this task's effect depend on whatever else happens to be orphaned at the
+  # time -- a far larger blast radius than the problem warrants, and one that
+  # changes between runs. Named packages only.
   #
   # Idempotent by construction: `state: absent` on an already-absent package is a
   # no-op, so this reports no change on every run after the first.
-  # scripts/verify.sh asserts these stay absent -- and, unlike this list, matches
-  # network-manager-* by pattern, so a plugin a future Kali adds is caught even
-  # though nothing here purged it.
+  # scripts/verify.sh asserts this same set stays absent -- and, unlike this
+  # list, matches network-manager-* by pattern, so a plugin a future Kali adds is
+  # caught even though nothing here purged it.
   ansible.builtin.apt:
     name:
-      - openvpn
+      # The NetworkManager VPN plugins the desktop recommends.
       - network-manager-openvpn
       - network-manager-openvpn-gnome
       - network-manager-pptp
@@ -249,6 +262,22 @@
       - network-manager-vpnc-gnome
       - network-manager-fortisslvpn
       - network-manager-fortisslvpn-gnome
+      # The clients those plugins drove, which outlive them.
+      - openvpn
+      - openconnect
+      - vpnc
+      - vpnc-scripts
+      - pptp-linux
+      # strongswan, named as it is actually installed: Kali pulls the daemon
+      # packages, not the `strongswan` metapackage. The two libstrongswan
+      # packages go too -- not because a library can dial a tunnel, but because
+      # leaving them is the same orphaning mistake that left openvpn behind.
+      - strongswan-starter
+      - strongswan-charon
+      - strongswan-libcharon
+      - libcharon-extauth-plugins
+      - libstrongswan
+      - libstrongswan-standard-plugins
     state: absent
     purge: true
 
@@ -344,6 +373,17 @@
   # -- so the package is pinned to -1, which makes apt refuse it even when asked
   # for it by name. scripts/verify.sh asserts it stays ABSENT; the last task in
   # this file asserts this pin is what is keeping it that way.
+  #
+  # `Package:` is a GLOB, and that field genuinely is glob-matched (unlike
+  # `Pin: origin`, which is a plain string comparison -- see below). So
+  # mullvad-vpn* covers a mullvad-vpn-beta, or whatever a renamed successor is
+  # called, instead of leaving the obvious way around the pin open: pinning one
+  # exact name only works until Mullvad ships a second one.
+  #
+  # `Pin: origin *` is left EXACTLY as it is. It was measured working on this
+  # guest -- `apt-cache policy mullvad-vpn` reports the candidate at priority -1
+  # and `apt-get -s install mullvad-vpn` refuses -- and the task at the end of
+  # this file will fail the build loudly if that ever stops being true.
   ansible.builtin.copy:
     dest: /etc/apt/preferences.d/99-anon-egress-no-vpn-client
     owner: root
@@ -353,7 +393,7 @@
       # Managed by Ansible (role: workstation).
       # The workstation never runs a VPN client: the gateway is the anonymity
       # layer, and credentials live only there.
-      Package: mullvad-vpn
+      Package: mullvad-vpn*
       Pin: origin *
       Pin-Priority: -1
 

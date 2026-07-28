@@ -418,6 +418,16 @@ while read -r short role vm_idx; do
   # equality against dpkg's own output -- never a substring -- so one package
   # name can never be spoofed by another. The single deliberate exception is
   # vpn_nm_plugins, which is a prefix match by design and errs toward reporting.
+  # This list mirrors the purge list in the workstation role's desktop.yaml, and
+  # the mirroring is the point: the role removes them, this asserts they stayed
+  # removed. The standalone clients matter as much as the plugins -- a
+  # NetworkManager plugin is a GUI in front of a binary that outlives it, and
+  # this guest was measured carrying working openvpn, openconnect, vpnc, pptp
+  # and strongswan binaries with every plugin already gone.
+  #
+  # strongswan is named the way it is actually installed (the daemon packages)
+  # AND as the metapackage, which is not installed today but would be on an image
+  # that pulls it.
   vpn_watch_list="mullvad-vpn \
       network-manager-openvpn network-manager-openvpn-gnome \
       network-manager-pptp network-manager-pptp-gnome \
@@ -425,7 +435,10 @@ while read -r short role vm_idx; do
       network-manager-openconnect network-manager-openconnect-gnome \
       network-manager-vpnc network-manager-vpnc-gnome \
       network-manager-fortisslvpn network-manager-fortisslvpn-gnome \
-      openvpn wireguard wireguard-tools strongswan"
+      openvpn openconnect vpnc vpnc-scripts pptp-linux \
+      wireguard wireguard-tools \
+      strongswan strongswan-starter strongswan-charon strongswan-libcharon \
+      libcharon-extauth-plugins libstrongswan libstrongswan-standard-plugins"
 
   vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' 2>/dev/null; echo __rc=\$?; echo __vpnscan=done" \
       2>/dev/null | tr -d '\r' || true)"
