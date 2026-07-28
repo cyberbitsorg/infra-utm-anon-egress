@@ -152,6 +152,39 @@ got="$(mullvad_exit_candidates "$J" "$S" bg | tr '\n' ' ')"
 got="$(mullvad_exit_candidates "$J" "$S" se | tr '\n' ' ')"
 [[ -z "$got" ]] || note "se has no config on disk, so no candidates (got '${got}')"
 
+echo "mullvad_resolve_pair (entry-country pre-filter, repeated):"
+# A single resolve below only proves the filter fired ONCE, and that is nearly
+# no evidence: with entry_spec "" the default-spec pool is the 7 active
+# relays, 3 of which are bg (the exit's country here). Delete the pre-filter
+# and the loop still lands outside bg by pure luck on 4-of-7 draws -- a coin
+# flip that a mutation-tester found catches its own removal only ~half the
+# time. Resolve fresh 25 times, each with its OWN pin (a reused pin would
+# just replay one draw, defeating the whole point), and check the invariant
+# ourselves on every draw. Each iteration is wrapped in an `if`, so a mutated
+# failure is caught by our own note rather than aborting the whole suite
+# under `set -e` and pointing at the backstop instead of the missing filter.
+# This runs BEFORE the single-shot checks below for the same reason: those
+# are unguarded, and if a mutation makes one of them fail, `set -e` would kill
+# the script before ever reaching this block. If the pre-filter is gone,
+# either some iteration draws a same-country entry (caught below by name) or
+# mullvad_assert_multihop rejects it and the resolve call fails (also caught
+# below by name). With 4 of 7 candidates legal, the chance all 25 iterations
+# luck into a legal draw despite a missing filter is (4/7)^25, on the order
+# of 1 in a million -- decisive rather than a coin flip.
+for i in $(seq 1 25); do
+  mpin="${tmp}/chosen_mut_${i}"
+  rm -f "$mpin"
+  if out="$(mullvad_resolve_pair "$J" "$S" bg "" "$mpin" 2>/dev/null)"; then
+    e="${out%% *}"; x="${out##* }"
+    ec="$(mullvad_relay_field "$J" "$e" country_code)"
+    xc="$(mullvad_relay_field "$J" "$x" country_code)"
+    [[ "$ec" != "$xc" ]] \
+      || note "iteration ${i}: entry ${e} (${ec}) shares the exit ${x}'s country '${xc}' -- the entry-country pre-filter did not fire"
+  else
+    note "iteration ${i}: mullvad_resolve_pair failed to find a legal entry, though 4 of 7 default candidates are outside bg -- the entry-country pre-filter regressed"
+  fi
+done
+
 echo "mullvad_resolve_pair:"
 rm -f "$PIN"
 got="$(mullvad_resolve_pair "$J" "$S" bg "" "$PIN")"
