@@ -122,3 +122,109 @@
 
       [keyfile]
       unmanaged-devices=interface-name:{{ anon_ws_if }}
+
+- name: Install the Kali XFCE desktop
+  # WITH recommends, deliberately. Measured on this image: 951 packages with
+  # recommends versus 537 without. The 414 extra are fonts, codecs and utilities
+  # that make the desktop feel complete -- a desktop metapackage installed without
+  # its Recommends is subtly broken in ways that are tedious to chase later.
+  #
+  # The cost is that recommends ALSO pull ten NetworkManager VPN plugins, which
+  # the next task purges. They are Recommends and not Depends, so removing them
+  # cannot cascade into removing the desktop.
+  #
+  # This is the longest single operation in the repo: ~951 packages, every byte of
+  # it through the WireGuard tunnel. Expect many minutes with no output. The SSH
+  # keepalives configured in ansible.cfg are what keep this from looking like a
+  # hang; they are answered at the transport layer while apt works.
+  #
+  # No cache_valid_time: a FAILED apt update still refreshes the timestamp, and
+  # the next hour of retries would then skip the update and report the useless
+  # "No package matching 'kali-desktop-xfce' is available".
+  ansible.builtin.apt:
+    name: kali-desktop-xfce
+    state: present
+    install_recommends: true
+    update_cache: true
+
+- name: Purge the NetworkManager VPN plugins
+  # A GUI "add a VPN connection" wizard on the one host that must never hold VPN
+  # credentials is an invitation to break the design by hand. These are Recommends
+  # of the desktop, so purging them leaves the desktop fully intact.
+  #
+  # Idempotent by construction: `state: absent` on an already-absent package is a
+  # no-op, so this reports no change on every run after the first.
+  # scripts/verify.sh asserts the same list stays absent, which is what catches a
+  # future dist-upgrade re-satisfying the Recommends.
+  ansible.builtin.apt:
+    name:
+      - network-manager-openvpn
+      - network-manager-openvpn-gnome
+      - network-manager-pptp
+      - network-manager-pptp-gnome
+      - network-manager-l2tp
+      - network-manager-l2tp-gnome
+      - network-manager-openconnect
+      - network-manager-openconnect-gnome
+      - network-manager-vpnc
+      - network-manager-vpnc-gnome
+      - network-manager-fortisslvpn
+      - network-manager-fortisslvpn-gnome
+    state: absent
+    purge: true
+
+- name: Ensure the lightdm config directory exists
+  ansible.builtin.file:
+    path: /etc/lightdm/lightdm.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Never auto-log in to the desktop
+  # The same decision already applied to the getty auto-login drop-ins this role
+  # removes: an unauthenticated session on an anonymity workstation is not
+  # acceptable, and a desktop that logs itself in hands a full session to anyone
+  # who opens the UTM window.
+  #
+  # Asserted explicitly rather than trusting the packaged default, because that
+  # default is Kali's to change and this is a property we depend on. The empty
+  # autologin-user overrides anything set in /etc/lightdm/lightdm.conf: files in
+  # lightdm.conf.d are read after it, and 99- sorts last.
+  ansible.builtin.copy:
+    dest: /etc/lightdm/lightdm.conf.d/99-anon-egress-no-autologin.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (role: workstation).
+      [Seat:*]
+      autologin-user=
+      autologin-user-timeout=0
+
+- name: Read the current default systemd target
+  ansible.builtin.command: systemctl get-default
+  register: anon_default_target
+  changed_when: false
+
+- name: Boot into the graphical target
+  # `systemctl set-default` is not idempotent in Ansible's eyes -- it rewrites the
+  # symlink and always reports success -- so the read above gates it and keeps
+  # `make configure` at changed=0.
+  ansible.builtin.command: systemctl set-default graphical.target
+  when: anon_default_target.stdout | trim != 'graphical.target'
+
+- name: Start the display manager
+  # set-default only decides what the NEXT boot does; it does not start anything
+  # now. Installing lightdm does not launch it either -- systemd had already
+  # reached its target before the package existed. Without this the role finishes
+  # "successfully" with a fully installed desktop and no greeter, which is a
+  # confusing state to hand someone: the UTM window still shows a text console
+  # and nothing says why.
+  #
+  # enabled AND started: enabled makes it survive a reboot, started makes the
+  # greeter appear on the run that installed it.
+  ansible.builtin.systemd_service:
+    name: lightdm
+    enabled: true
+    state: started
