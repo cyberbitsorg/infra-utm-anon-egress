@@ -72,6 +72,18 @@
     group: root
     mode: "0755"
 
+- name: Remove the old 00-prefixed NetworkManager drop-in, if present
+  # An earlier version of this role wrote 00-anon-egress-unmanaged.conf. A 00-
+  # prefix sorts FIRST, which made it the WEAKEST file in the directory rather
+  # than the strongest -- see the note below. Ansible's copy below only ever
+  # creates the new 99- file; it will not remove a stale 00- one left over from
+  # that earlier run, and leaving both in place is worse than either alone (two
+  # files, same keys, conflicting authority by sort order). No-op on a clean
+  # host that never had the old file.
+  ansible.builtin.file:
+    path: /etc/NetworkManager/conf.d/00-anon-egress-unmanaged.conf
+    state: absent
+
 - name: Take NetworkManager's hands off the network
   # NetworkManager is a hard dependency of kali-desktop-xfce, so it WILL be
   # installed. It is not masked: with no managed device and no DNS control it can
@@ -86,8 +98,20 @@
   # unmanaged-devices is the other half: the NIC is statically configured by
   # cloud-init/netplan and never changes, so there is nothing for NetworkManager
   # to usefully do with it.
+  #
+  # Filename is prefixed 99-, not 00-. NetworkManager reads
+  # /etc/NetworkManager/conf.d/*.conf in ALPHABETICAL order and, for a plain key
+  # assignment, the LAST file read wins -- later files override earlier ones. A
+  # 00- prefix would sort first and make this the WEAKEST file in the directory:
+  # any other drop-in (one the network-manager package ships, a future Kali
+  # update, or the well-known 10-globally-managed-devices.conf pattern setting
+  # unmanaged-devices=none) would sort after it and silently win, handing the NIC
+  # and /etc/resolv.conf back to NetworkManager. This file's entire purpose is to
+  # be authoritative, so it must sort LAST by construction, not by the accident
+  # of no one else having shipped a conflicting drop-in yet. Do not renumber this
+  # back to 00- for tidiness.
   ansible.builtin.copy:
-    dest: /etc/NetworkManager/conf.d/00-anon-egress-unmanaged.conf
+    dest: /etc/NetworkManager/conf.d/99-anon-egress-unmanaged.conf
     owner: root
     group: root
     mode: "0644"
