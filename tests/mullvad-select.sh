@@ -136,5 +136,51 @@ echo "mullvad_endpoint_port_for:"
 [[ "$(mullvad_endpoint_port_for "$J" bg-sof-wg-001)" == "3225" ]] \
   || note "the exit's multihop_port is the endpoint port"
 
+# A fake secrets dir: only some relays have a config on disk, which is the real
+# world (the operator downloads a subset).
+mkdir -p "${tmp}/secrets"
+for h in bg-sof-wg-001 bg-sof-wg-002 nl-ams-wg-001; do
+  cp "${tmp}/exit.conf" "${tmp}/secrets/${h}.conf"
+done
+S="${tmp}/secrets"
+PIN="${tmp}/chosen"
+
+echo "mullvad_exit_candidates:"
+got="$(mullvad_exit_candidates "$J" "$S" bg | tr '\n' ' ')"
+[[ "$got" == "bg-sof-wg-001 bg-sof-wg-002 " ]] \
+  || note "only relays with a config on disk are exit candidates (got '${got}')"
+got="$(mullvad_exit_candidates "$J" "$S" se | tr '\n' ' ')"
+[[ -z "$got" ]] || note "se has no config on disk, so no candidates (got '${got}')"
+
+echo "mullvad_resolve_pair:"
+rm -f "$PIN"
+got="$(mullvad_resolve_pair "$J" "$S" bg "" "$PIN")"
+entry="${got%% *}"; exit_h="${got##* }"
+[[ "$exit_h" == bg-sof-wg-00[12] ]] || note "exit must be a bg server with a config (got '${exit_h}')"
+[[ "$(mullvad_relay_field "$J" "$entry" country_code)" != "bg" ]] \
+  || note "a default entry must not be in the exit's country (got '${entry}')"
+[[ -f "$PIN" ]] || note "the pin file must be written"
+[[ "$(cat "$PIN")" == "$got" ]] || note "the pin must contain the resolved pair"
+
+# Stability: a second call with the same .env must reuse the pin, or the tunnel
+# would move country on every `make configure`.
+again="$(mullvad_resolve_pair "$J" "$S" bg "" "$PIN")"
+[[ "$again" == "$got" ]] || note "an unchanged .env must reuse the pin ('${got}' -> '${again}')"
+
+# Invalidation: changing the exit spec must discard the pin.
+changed="$(mullvad_resolve_pair "$J" "$S" nl "" "$PIN")"
+[[ "${changed##* }" == "nl-ams-wg-001" ]] \
+  || note "changing MULLVAD_EXIT must re-resolve (got '${changed}')"
+
+# An explicit entry spec is honoured.
+got="$(mullvad_resolve_pair "$J" "$S" bg se "$PIN")"
+[[ "${got%% *}" == se-*-wg-* ]] || note "an explicit entry spec must be used (got '${got}')"
+
+# An impossible ask fails loudly rather than silently picking something else.
+mullvad_resolve_pair "$J" "$S" zz "" "$PIN" >/dev/null 2>&1 \
+  && note "an exit spec matching nothing must fail"
+mullvad_resolve_pair "$J" "$S" bg bg "$PIN" >/dev/null 2>&1 \
+  && note "an entry spec confined to the exit's own country must fail"
+
 [[ "$fail" -eq 0 ]] && echo "mullvad-select: OK"
 exit "$fail"
