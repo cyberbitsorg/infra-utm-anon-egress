@@ -88,3 +88,54 @@ mullvad_pick_random() {
   idx=$(( (RANDOM % n) + 1 ))
   printf '%s\n' "$lines" | grep . | sed -n "${idx}p"
 }
+
+# Print the exit server's config with ONLY the Endpoint line replaced.
+#
+# The count is checked BEFORE anything is printed. Emitting a partial config and
+# then returning non-zero would leave a caller that forgot to check with a file
+# that looks plausible and points at the wrong server.
+mullvad_rewrite_endpoint() {
+  local conf="${1:?config path required}" ip="${2:?entry ip required}" port="${3:?exit port required}" n line
+  n="$(grep -c -E '^[[:space:]]*Endpoint[[:space:]]*=' "$conf" || true)"
+  [[ "${n:-0}" -eq 1 ]] \
+    || { echo "${conf}: expected exactly 1 Endpoint line, found ${n:-0}." >&2; return 1; }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*Endpoint[[:space:]]*= ]]; then
+      printf 'Endpoint = %s:%s\n' "$ip" "$port"
+    else
+      printf '%s\n' "$line"
+    fi
+  done < "$conf"
+}
+
+# The exit server's multihop_port IS the endpoint port. Separate function so the
+# name says why a port from the relay table ends up in an Endpoint line.
+mullvad_endpoint_port_for() {
+  mullvad_relay_field "${1:?relay json required}" "${2:?exit hostname required}" multihop_port
+}
+
+# Return 0 if <entry>/<exit> is genuine multihop, else print ONE specific reason
+# to stderr and return 1.
+#
+# The operator's requirement is "always multihop", so single-hop has to be
+# unreachable rather than discouraged -- the same reasoning that keeps
+# net.ipv4.ip_forward at 0 on disk. Each message names both servers so it says
+# what to change instead of that something is invalid.
+mullvad_assert_multihop() {
+  local json="${1:?relay json required}" entry="${2:?entry hostname required}" exit_h="${3:?exit hostname required}"
+  local ec xc port
+  [[ "$entry" != "$exit_h" ]] \
+    || { echo "entry and exit are both ${entry}: that is a single hop, not multihop." >&2; return 1; }
+  ec="$(mullvad_relay_field "$json" "$entry" country_code)"
+  xc="$(mullvad_relay_field "$json" "$exit_h" country_code)"
+  [[ -n "$ec" ]] || { echo "entry ${entry} is not in the relay list." >&2; return 1; }
+  [[ -n "$xc" ]] || { echo "exit ${exit_h} is not in the relay list." >&2; return 1; }
+  [[ "$ec" != "$xc" ]] \
+    || { echo "entry ${entry} and exit ${exit_h} are both in '${ec}'. Multihop through one jurisdiction buys nothing; set MULLVAD_ENTRY to another country." >&2; return 1; }
+  port="$(mullvad_endpoint_port_for "$json" "$exit_h")"
+  [[ -n "$port" && "$port" =~ ^[0-9]+$ ]] \
+    || { echo "exit ${exit_h} has no usable multihop_port in the relay list." >&2; return 1; }
+  [[ "$port" != "$MULLVAD_SINGLEHOP_PORT" ]] \
+    || { echo "exit ${exit_h} resolves to port ${MULLVAD_SINGLEHOP_PORT}, which is single-hop. Refusing to build." >&2; return 1; }
+  return 0
+}

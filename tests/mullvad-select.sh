@@ -72,5 +72,52 @@ case "$got" in a|b|c) ;; *) note "must pick one of the input lines (got '${got}'
 printf '' | mullvad_pick_random >/dev/null 2>&1 \
   && note "empty input must return non-zero"
 
+# A fixture exit config. Realistic shape, obviously fake key material.
+cat > "${tmp}/exit.conf" <<'EOF'
+[Interface]
+PrivateKey = aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZWFsIGtleQo=
+Address = 10.66.12.34/32,fc00:bbbb:bbbb:bb01::1:2c21/128
+DNS = 10.64.0.1
+
+[Peer]
+PublicKey = UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=
+AllowedIPs = 0.0.0.0/0,::/0
+Endpoint = 146.70.188.130:51820
+EOF
+
+echo "mullvad_rewrite_endpoint:"
+out="$(mullvad_rewrite_endpoint "${tmp}/exit.conf" 185.213.154.66 3225)"
+[[ "$(grep -c '^Endpoint = 185.213.154.66:3225$' <<<"$out")" -eq 1 ]] \
+  || note "the endpoint must be rewritten to entry-ip:exit-port"
+[[ "$(grep -c '^Endpoint' <<<"$out")" -eq 1 ]] \
+  || note "there must be exactly one Endpoint line afterwards"
+
+# The whole safety of this transformation is that it changes NOTHING else: the
+# keys, Address and AllowedIPs must stay the exit server's, byte for byte.
+diff <(grep -v '^Endpoint' "${tmp}/exit.conf") <(grep -v '^Endpoint' <<<"$out") >/dev/null \
+  || note "every line except Endpoint must be untouched"
+
+# Two Endpoint lines is a malformed config, not something to guess at.
+cp "${tmp}/exit.conf" "${tmp}/two.conf"
+echo 'Endpoint = 1.2.3.4:51820' >> "${tmp}/two.conf"
+mullvad_rewrite_endpoint "${tmp}/two.conf" 1.1.1.1 3225 >/dev/null 2>&1 \
+  && note "two Endpoint lines must be rejected"
+
+echo "mullvad_assert_multihop:"
+mullvad_assert_multihop "$J" se-sto-wg-001 bg-sof-wg-001 2>/dev/null \
+  || note "a different-country pair with a real multihop port must pass"
+mullvad_assert_multihop "$J" bg-sof-wg-001 bg-sof-wg-001 2>/dev/null \
+  && note "the same server as entry and exit must be rejected"
+mullvad_assert_multihop "$J" bg-sof-wg-002 bg-sof-wg-001 2>/dev/null \
+  && note "entry and exit in the same country must be rejected"
+mullvad_assert_multihop "$J" bg-sof-wg-001 se-got-wg-001 2>/dev/null \
+  && note "an exit whose multihop_port is 51820 must be rejected"
+mullvad_assert_multihop "$J" bg-sof-wg-001 does-not-exist 2>/dev/null \
+  && note "an unknown exit must be rejected"
+
+echo "mullvad_endpoint_port_for:"
+[[ "$(mullvad_endpoint_port_for "$J" bg-sof-wg-001)" == "3225" ]] \
+  || note "the exit's multihop_port is the endpoint port"
+
 [[ "$fail" -eq 0 ]] && echo "mullvad-select: OK"
 exit "$fail"
