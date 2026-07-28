@@ -172,14 +172,27 @@ vpn_pkg_present() {
 # named network-manager-<protocol>[-gnome] by Debian policy, so the pattern
 # catches the ones nobody has thought of yet.
 #
-# `network-manager` itself does not match (no trailing dash); the applet and the
-# GTK front-end do, and are the only two exclusions -- both are pulled in by
-# kali-desktop-xfce and neither can dial a VPN. Anything else that matches is
-# reported, and an over-broad match here costs a build failure with the package
-# name printed, which is the cheap direction to be wrong in.
+# `network-manager` itself does not match (no trailing dash). Four packages are
+# excluded, all of them pulled in by kali-desktop-xfce and none able to dial a
+# VPN, because a front-end without a plugin has no protocol to speak:
+#
+#   -applet, -gnome  the tray icon and the GTK connection editor
+#   -tui             nmtui, the curses front-end
+#   -l10n            translations; no executable code at all
+#
+# The first cold build after this check was widened found -l10n and -tui and
+# failed on them. They are excluded rather than purged: they are not VPN
+# clients, and purging translations to satisfy a leak check would be theatre.
+#
+# Anything else that matches is reported. Keeping the net broad and extending
+# this exclusion list when a false positive appears is deliberate: a new
+# exclusion is a one-line change made with the package name in front of you,
+# whereas a missed plugin prints green over a working VPN GUI. Failing loudly on
+# a harmless package is the cheap direction to be wrong in.
 vpn_nm_plugins() {
   awk '$1 ~ /^network-manager-/ \
        && $1 != "network-manager-applet" && $1 != "network-manager-gnome" \
+       && $1 != "network-manager-tui" && $1 != "network-manager-l10n" \
        && $2 != "not-installed" && $2 != "config-files" { print $1 }' <<<"$1" \
     | sort -u || true
 }

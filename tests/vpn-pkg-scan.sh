@@ -81,12 +81,17 @@ present "openvpn installed" "network-manager-openvpn" \
   && note "a shorter package name must not satisfy a longer one"
 
 echo "vpn_nm_plugins:"
+# Exactly what a cold `make up` leaves on the workstation. -l10n and -tui are in
+# here because the first cold build after this check was widened failed on them:
+# both match network-manager-*, neither is a VPN client.
 dump_desktop="base-files installed
 network-manager installed
 network-manager-applet installed
-network-manager-gnome installed"
+network-manager-gnome installed
+network-manager-l10n installed
+network-manager-tui installed"
 [[ -z "$(vpn_nm_plugins "$dump_desktop")" ]] \
-  || note "a stock desktop (nm + applet + gnome) must report no plugins"
+  || note "a stock desktop (nm + applet + gnome + l10n + tui) must report no plugins"
 
 # The open-ended half: a plugin no list names, which is the whole point.
 got="$(vpn_nm_plugins "${dump_desktop}

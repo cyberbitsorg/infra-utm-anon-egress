@@ -84,12 +84,20 @@ mechanism: destroy, then `make up` clones a fresh Kali from the base image.
 
 ## How long `make up` takes, and how to watch it
 
-A full cold build — `make destroy`, then `make up` — was **measured at about
-3 minutes** end to end on an M-series Mac with the base images already
-downloaded. That figure predates the workstation desktop and is now a floor
-rather than an estimate: `kali-desktop-xfce` pulls roughly 950 packages and
-Mullvad Browser on top of it, every byte over the VPN, and that one task now
-dominates the build. Re-measure on your own link with
+A full cold build — `make destroy`, then `make up` — is **measured at about
+6.5 minutes** end to end on an M-series Mac, with the desktop and Mullvad Browser
+installed.
+
+**That figure excludes the base-image download**, which `make destroy` does not
+touch and which every build after the first reuses from `images/`. On a genuinely
+first-ever run, that download dominates everything on this page — the Kali image
+alone is ~25 GiB raw — and no measurement of the rest is a useful predictor of
+it. See the "Base images" row below.
+
+Of the 6.5 minutes, roughly half is the workstation's ~950-package desktop,
+downloaded over the VPN, so the figure tracks your exit node more than your Mac.
+(Before the desktop existed the same build took about 3 minutes.) Re-measure on
+your own link with
 
 ```bash
 make destroy && time make up 2>&1 | tee cold-build.log
