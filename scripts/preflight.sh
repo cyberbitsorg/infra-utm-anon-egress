@@ -97,4 +97,36 @@ else
   warn "MULLVAD_WG_CONFIG is not set in .env: the gateway will have no tunnel and the workstation no egress."
 fi
 
+# The internal segment rides an Apple vmnet host-only switch whose OWN subnet is
+# assigned by macOS (com.apple.vmnet.plist, Host_Net_Address), independent of
+# LAB_SEGMENT. If that subnet overlaps a route the host already has -- most
+# painfully a VPN whose tunnel gateway lands inside it -- macOS binds that route
+# to UTM's bridge instead of the tunnel, so the VM switch silently swallows the
+# VPN's traffic. (This bit us once: a VPN gateway 192.168.128.1 fell inside the
+# vmnet default 192.168.128.0/24 and the 10.x routes vanished into bridge100.)
+# HOST_ONLY_SUBNET declares the range the operator set the plist to; refuse to
+# build while it collides, and flag drift between the plist and this declaration.
+host_only="${HOST_ONLY_SUBNET:-172.16.20.0/24}"
+log "Checking host-only subnet ${host_only} for route collisions"
+collision=""
+while read -r dest gw; do
+  cidr_contains "$host_only" "$gw" && { collision="route ${dest} via ${gw}"; break; }
+done < <(netstat -rn -f inet 2>/dev/null \
+           | awk 'NR>1 && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1, $2}')
+if [[ -n "$collision" ]]; then
+  die "Host-only subnet ${host_only} collides: ${collision} sits inside it, so UTM's vmnet bridge would hijack that traffic (typically a VPN). Move HOST_ONLY_SUBNET and the macOS Host_Net_Address off this range -- see README 'Host-only subnet'."
+fi
+
+# Drift: a live vmnet host bridge already up on a subnet that ISN'T the declared
+# one means the plist and lab.conf disagree -- the next VM start would bring the
+# bridge up on the stale range. Warn rather than die: no build is in flight yet.
+for brif in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep '^bridge'); do
+  ifconfig "$brif" 2>/dev/null | grep -q 'member: vmenet' || continue
+  braddr="$(ifconfig "$brif" 2>/dev/null | awk '/inet /{print $2; exit}')"
+  [[ -n "$braddr" ]] || continue
+  cidr_contains "$host_only" "$braddr" \
+    || warn "vmnet bridge ${brif} is up on ${braddr}, outside declared ${host_only}: macOS Host_Net_Address and lab.conf disagree. See README 'Host-only subnet'."
+done
+ok "No existing route collides with ${host_only}"
+
 ok "Preflight passed"

@@ -33,6 +33,22 @@ LAB_SSH_KEY="${HOME}/.ssh/id_ed25519_anon.pub"
 LAB_SEGMENT="10.20.0.0/24"
 GATEWAY_INTERNAL_IP="10.20.0.1"
 
+# The vmnet host-only SWITCH itself also gets a subnet, assigned by macOS, NOT by
+# this repo -- UTM only asks vmnet for "host" mode, and macOS picks the bridge
+# address (192.168.128.0/24 by default). Separate from LAB_SEGMENT above (the
+# static IPs the guests use). It matters because if that subnet overlaps a route
+# the host already has -- classically a VPN whose tunnel gateway lands inside it
+# -- macOS binds that route to UTM's bridge and the VPN's traffic silently
+# disappears into the VM switch.
+#
+# On current macOS this subnet is effectively FIXED (the plist Host_Net_* keys
+# are ignored; the Shared_Net_Address + dhcpd_leases workaround gets reverted --
+# see README "Host-only subnet"). So rather than move it, DECLARE the subnet the
+# bridge actually uses here, and preflight refuses to build while a live route
+# collides with it. The fix is operational: bring the VPN (or the VMs) down
+# first, so the bridge and the tunnel are never up on the same range at once.
+HOST_ONLY_SUBNET="192.168.128.0/24"
+
 # --- Resource defaults ------------------------------------------------------
 # Defaults for every VM in LAB_VMS below. A VM overrides any of these with a
 # cpu= / ram= / disk= field in its fleet entry.

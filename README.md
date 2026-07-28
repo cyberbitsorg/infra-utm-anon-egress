@@ -205,6 +205,56 @@ file, never `-e key=value` — command-line arguments are visible to every user 
 the host in `ps auxww`. The `group_vars` defaults stay empty strings on purpose,
 since those files *are* tracked.
 
+### Host-only subnet (and the VPN collision it can cause)
+
+The internal segment rides an Apple **vmnet host-only** switch. That switch has
+its own subnet — the address the host side of the bridge (`bridge100` on the Mac)
+gets — and **macOS assigns it, not this repo**: UTM only asks vmnet for `host`
+mode, and macOS picks the bridge address itself (`192.168.128.0/24` by default),
+with no reliable knob to change it (see below). It is independent of
+`LAB_SEGMENT`, which is the static address space the guests use on that switch.
+
+This bites when the vmnet subnet **overlaps a route the Mac already has**. The
+macOS default is `192.168.128.0/24`, and a WireGuard VPN (Squawker) used a tunnel
+whose gateway was `192.168.128.1` inside a pushed `192.168.128.0/18`. Because a
+connected `/24` on `bridge100` outranks the tunnel's `/18`, macOS bound the VPN's
+`10.x` routes to the **bridge** instead of the tunnel. Symptom: the VPN client
+says "tunnel up", but hosts behind it are unreachable — the packets vanish into
+the VM switch. Confirm with `route -n get <ip>`; if `interface:` is `bridge…`
+rather than a `utun…`, this is it.
+
+Moving the bridge off that range turns out **not to be cleanly possible** on
+current Apple Silicon macOS. `com.apple.vmnet.plist`'s `Host_Net_*` keys are
+ignored for host mode (setting them leaves `bridge100` where it was), and the
+`Shared_Net_Address` + wiping `/var/db/dhcpd_leases` workaround is reverted by
+the system on the next VM start. It is "not bulletproof" by every account. So
+this repo does **not** try to move the bridge.
+
+Instead we treat the collision as a fail-closed condition. `HOST_ONLY_SUBNET` in
+`lab.conf` **declares the subnet the bridge actually uses** (`192.168.128.0/24`,
+the macOS default), and `make preflight` refuses to build while a live route's
+gateway lands inside it — which is exactly what a colliding VPN looks like. The
+remedy is operational and 100% reliable: **bring the VPN down (or the VMs down)
+before building**, so the bridge and the tunnel are never up on the same range at
+once. Preflight also warns if the running bridge is on a subnet other than the
+declared one, so a future macOS default change surfaces immediately rather than
+silently.
+
+If you ever *do* want to attempt the move, the fragile community recipe is:
+
+```bash
+P=/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist
+sudo defaults write "$P" Shared_Net_Address -string 172.16.20.1   # NOT Host_Net_*
+sudo defaults write "$P" Shared_Net_Mask   -string 255.255.255.0
+sudo rm -f /var/db/dhcpd_leases            # else bootpd re-derives the old subnet
+make down && osascript -e 'quit app "UTM"' && sudo reboot
+```
+
+Expect macOS to sometimes revert it; if it does, set `HOST_ONLY_SUBNET` back to
+whatever `bridge100` actually shows and rely on the preflight guard.
+See [UTM #4932](https://github.com/utmapp/UTM/discussions/4932) and
+[Apple DTS 702377](https://developer.apple.com/forums/thread/702377).
+
 ## The anonymity layer
 
 The gateway runs a **Mullvad multihop WireGuard tunnel**, and an nftables ruleset

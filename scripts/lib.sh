@@ -196,6 +196,40 @@ internal_ip_for() {
   esac
 }
 
+# --- Network math -----------------------------------------------------------
+# Tiny IPv4 helpers behind preflight's host-only-subnet collision guard. bash
+# 3.2 safe: plain integer arithmetic, and every octet is forced base-10 (10#)
+# so a route-table entry like 010 never gets read as octal under set -e.
+
+# Dotted-quad -> unsigned 32-bit integer on stdout. Emits nothing and returns 1
+# for anything that is not a.b.c.d with each octet 0-255 (so a MAC-formatted
+# gateway or a link#N row is rejected, not mis-parsed).
+ip_to_int() {
+  local o IFS=.
+  # shellcheck disable=SC2086
+  set -- ${1:-}
+  [[ $# -eq 4 ]] || return 1
+  for o in "$@"; do
+    [[ "$o" =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$o <= 255 )) || return 1
+  done
+  echo "$(( (10#$1 << 24) | (10#$2 << 16) | (10#$3 << 8) | 10#$4 ))"
+}
+
+# cidr_contains <a.b.c.d/prefix> <a.b.c.d>: return 0 if the IP is inside the
+# CIDR, 1 if outside, 2 if either argument is malformed (callers treat 2 as
+# "cannot tell", never as a match).
+cidr_contains() {
+  local cidr="${1:-}" ip="${2:-}" net prefix mask netint ipint
+  net="${cidr%/*}"; prefix="${cidr#*/}"
+  [[ "$prefix" =~ ^[0-9]{1,2}$ ]] && (( prefix <= 32 )) || return 2
+  netint="$(ip_to_int "$net")" || return 2
+  ipint="$(ip_to_int "$ip")"   || return 2
+  (( prefix == 0 )) && return 0
+  mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+  (( (netint & mask) == (ipint & mask) ))
+}
+
 # --- SSH --------------------------------------------------------------------
 # Host-key options every connection in this repo uses. These VMs are disposable
 # by design -- 'make destroy && make up' hands the workstation a brand new host

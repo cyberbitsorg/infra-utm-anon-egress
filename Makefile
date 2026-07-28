@@ -57,6 +57,7 @@ verify: ## Assert the security property: workstation isolated, reachable via gat
 test: ## Run the shell unit tests (no UTM needed)
 	@bash tests/parse-vm-entry.sh
 	@bash tests/parse-nic-layout.sh
+	@bash tests/subnet-overlap.sh
 	@bash tests/seed-network.sh
 	@bash tests/gen-inventory.sh
 	@bash tests/ssh-jump.sh
