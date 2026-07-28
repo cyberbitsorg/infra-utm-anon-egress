@@ -16,11 +16,18 @@ note() { echo "  FAIL $1"; fail=1; }
 #   bg-sofia-... exists so a "bg-sof" prefix must not match it
 #   nl-ams-wg-002 is INACTIVE and must never be selected
 #   se-got-wg-001 has multihop_port 51820, the single-hop port, to drive Task 2
+#   bg-sof-wg-003 has NO multihop_port key at all, and bg-sof-wg-004 has one
+#   that is JSON null -- both are realistic shapes of "this relay has no
+#   usable multihop endpoint" and both must drive the same rejection in
+#   mullvad_assert_multihop. Marked INACTIVE so the empty-spec "7 active
+#   relays" count below does not have to change to accommodate them.
 cat > "${tmp}/relays.json" <<'EOF'
 [
  {"hostname":"bg-sof-wg-001","active":true,"ipv4_addr_in":"146.70.188.130","multihop_port":3225,"country_code":"bg","city_code":"sof"},
  {"hostname":"bg-sof-wg-002","active":true,"ipv4_addr_in":"146.70.188.194","multihop_port":3226,"country_code":"bg","city_code":"sof"},
  {"hostname":"bg-sofia-wg-001","active":true,"ipv4_addr_in":"146.70.188.200","multihop_port":3227,"country_code":"bg","city_code":"sfa"},
+ {"hostname":"bg-sof-wg-003","active":false,"ipv4_addr_in":"146.70.188.201","country_code":"bg","city_code":"sof"},
+ {"hostname":"bg-sof-wg-004","active":false,"ipv4_addr_in":"146.70.188.202","multihop_port":null,"country_code":"bg","city_code":"sof"},
  {"hostname":"se-got-wg-001","active":true,"ipv4_addr_in":"185.213.154.66","multihop_port":51820,"country_code":"se","city_code":"got"},
  {"hostname":"se-sto-wg-001","active":true,"ipv4_addr_in":"185.213.154.70","multihop_port":3301,"country_code":"se","city_code":"sto"},
  {"hostname":"se2-sto-wg-001","active":true,"ipv4_addr_in":"185.213.154.71","multihop_port":3302,"country_code":"se","city_code":"sto"},
@@ -97,11 +104,15 @@ out="$(mullvad_rewrite_endpoint "${tmp}/exit.conf" 185.213.154.66 3225)"
 diff <(grep -v '^Endpoint' "${tmp}/exit.conf") <(grep -v '^Endpoint' <<<"$out") >/dev/null \
   || note "every line except Endpoint must be untouched"
 
-# Two Endpoint lines is a malformed config, not something to guess at.
+# Two Endpoint lines is a malformed config, not something to guess at. The
+# rejection must be silent on stdout, not just non-zero: a caller that forgot
+# to check the return value must never be handed a plausible partial config.
 cp "${tmp}/exit.conf" "${tmp}/two.conf"
 echo 'Endpoint = 1.2.3.4:51820' >> "${tmp}/two.conf"
-mullvad_rewrite_endpoint "${tmp}/two.conf" 1.1.1.1 3225 >/dev/null 2>&1 \
+out2="$(mullvad_rewrite_endpoint "${tmp}/two.conf" 1.1.1.1 3225 2>/dev/null)" \
   && note "two Endpoint lines must be rejected"
+[[ -z "$out2" ]] \
+  || note "rejection must print nothing on stdout, not a partial config (got '${out2}')"
 
 echo "mullvad_assert_multihop:"
 mullvad_assert_multihop "$J" se-sto-wg-001 bg-sof-wg-001 2>/dev/null \
@@ -114,6 +125,12 @@ mullvad_assert_multihop "$J" bg-sof-wg-001 se-got-wg-001 2>/dev/null \
   && note "an exit whose multihop_port is 51820 must be rejected"
 mullvad_assert_multihop "$J" bg-sof-wg-001 does-not-exist 2>/dev/null \
   && note "an unknown exit must be rejected"
+mullvad_assert_multihop "$J" does-not-exist bg-sof-wg-001 2>/dev/null \
+  && note "an unknown entry must be rejected"
+mullvad_assert_multihop "$J" se-sto-wg-001 bg-sof-wg-003 2>/dev/null \
+  && note "an exit with no multihop_port key at all must be rejected"
+mullvad_assert_multihop "$J" se-sto-wg-001 bg-sof-wg-004 2>/dev/null \
+  && note "an exit whose multihop_port is null must be rejected"
 
 echo "mullvad_endpoint_port_for:"
 [[ "$(mullvad_endpoint_port_for "$J" bg-sof-wg-001)" == "3225" ]] \
