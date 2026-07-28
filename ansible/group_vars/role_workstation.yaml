@@ -32,6 +32,16 @@ common_packages:
 workstation_has_egress: true
 workstation_console_kernel: true
 
+# Install the Kali XFCE desktop and Mullvad Browser. Needs workstation_has_egress
+# for the same reason the console kernel does -- 951 packages and a browser have
+# to come from somewhere, and this host's only route is the gateway's tunnel.
+#
+# It ALSO needs workstation_console_password to be set. cloud-init locks the
+# account, so a graphical greeter with no password is a login prompt that cannot
+# be passed. The role fails early and says so rather than leaving you staring at
+# an unusable greeter.
+workstation_desktop: true
+
 # Console/GUI password for the workstation user. Empty = leave the account locked
 # as cloud-init created it, so the console is diagnostic only (you can read boot
 # and cloud-init output, but not log in). A desktop greeter needs this set.

@@ -123,6 +123,80 @@ py_on_ws() {
   on_ws "$ip" "python3 -c \"import base64;exec(base64.b64decode('${b64}'))\""
 }
 
+# vpn_pkg_status <dump> <package>: prints the db:Status-Status field dpkg-query
+# reported for <package> in a "Package Status\n"-per-line <dump>, or empty if
+# <package> never appears in it. Matched by exact field equality, never a
+# substring or pattern, so one package name can never be spoofed by another.
+#
+# Where the dump holds MORE THAN ONE record for the same name -- dpkg emits one
+# per architecture, and keeps a not-installed stanza for every package it has
+# ever known -- the record that counts as PRESENT wins, and the last record
+# decides only when no record does. Keeping "whichever sorted last" instead
+# (`$1 == p { s = $2 }`) resolves an ambiguous input toward "pass": a trailing
+# not-installed stanza masks a genuinely installed one and the host is reported
+# clean. That is the opposite of what this function is for.
+vpn_pkg_status() {
+  awk -v p="$2" '
+    $1 == p {
+      if ($2 != "not-installed" && $2 != "config-files") { print $2; found = 1; exit }
+      last = $2
+    }
+    END { if (!found && last != "") print last }
+  ' <<<"$1"
+}
+
+# vpn_pkg_present <dump> <package>: true if <package>'s status is anything
+# OTHER than not-installed or config-files -- i.e. something of it landed on
+# disk, whatever mid-install or purge-adjacent state it is otherwise sitting
+# in. Inverted rather than matching "installed" literally: a package
+# interrupted mid-install sits in `unpacked` or `half-configured` with its
+# files already there, and a filter that only recognizes the one steady-state
+# string would wave that straight through. A status nobody here has thought to
+# enumerate therefore fails safe (counts as present) instead of passing.
+vpn_pkg_present() {
+  local s
+  s="$(vpn_pkg_status "$1" "$2")"
+  [[ -n "$s" && "$s" != "not-installed" && "$s" != "config-files" ]]
+}
+
+# vpn_nm_plugins <dump>: prints every INSTALLED network-manager-* package in
+# <dump> that is not one of the three the desktop legitimately needs.
+#
+# This is the open-ended half of the VPN-client check, and the reason its green
+# message is allowed to say "no VPN client" rather than "none of the fourteen I
+# know about". A hand-written list can only ever name the plugins that existed
+# when it was written: a plugin a future Kali adds to the desktop's Recommends,
+# or one the operator apt-installs from the desktop's own terminal, is neither
+# purged by the role nor named here -- and the whole enumeration would then keep
+# printing green over a working OpenVPN GUI. Every NetworkManager VPN plugin is
+# named network-manager-<protocol>[-gnome] by Debian policy, so the pattern
+# catches the ones nobody has thought of yet.
+#
+# `network-manager` itself does not match (no trailing dash). Four packages are
+# excluded, all of them pulled in by kali-desktop-xfce and none able to dial a
+# VPN, because a front-end without a plugin has no protocol to speak:
+#
+#   -applet, -gnome  the tray icon and the GTK connection editor
+#   -tui             nmtui, the curses front-end
+#   -l10n            translations; no executable code at all
+#
+# The first cold build after this check was widened found -l10n and -tui and
+# failed on them. They are excluded rather than purged: they are not VPN
+# clients, and purging translations to satisfy a leak check would be theatre.
+#
+# Anything else that matches is reported. Keeping the net broad and extending
+# this exclusion list when a false positive appears is deliberate: a new
+# exclusion is a one-line change made with the package name in front of you,
+# whereas a missed plugin prints green over a working VPN GUI. Failing loudly on
+# a harmless package is the cheap direction to be wrong in.
+vpn_nm_plugins() {
+  awk '$1 ~ /^network-manager-/ \
+       && $1 != "network-manager-applet" && $1 != "network-manager-gnome" \
+       && $1 != "network-manager-tui" && $1 != "network-manager-l10n" \
+       && $2 != "not-installed" && $2 != "config-files" { print $1 }' <<<"$1" \
+    | sort -u || true
+}
+
 # dns_udp_probe <resolver> [qname] [timeout]
 #
 # Sends a real DNS query over UDP and prints the response code, or TIMEOUT.
@@ -304,7 +378,121 @@ while read -r short role vm_idx; do
     note_fail "${short} has ${count} NICs (${nics% }); an internal-only VM must have exactly one"
   fi
 
-  # 3. Positive controls for the tools the leak checks rely on. A bash built
+  # 3. No VPN client, of any kind, on an internal-only host.
+  #
+  # This is the machine-checkable form of "credentials live only on the gateway".
+  # Nothing else in this suite can see it: a VPN client sitting installed and
+  # unconfigured leaks nothing today, so every network probe stays green while the
+  # box acquires exactly the capability the design forbids.
+  #
+  # It guards two real drift paths. The Mullvad repo added for the browser also
+  # carries `mullvad-vpn` for arm64 (an apt pin blocks it, and this catches the
+  # pin being removed). And the Kali desktop RECOMMENDS a set of NetworkManager
+  # VPN plugins, which are purged at install time -- but a later dist-upgrade can
+  # re-satisfy a Recommends and quietly put an OpenVPN GUI back on the machine
+  # months after anyone last looked.
+  #
+  # The named list below is NOT the whole check, and must not be: it is a closed
+  # enumeration, while the message printed on success ("no VPN client installed")
+  # is an open-ended claim. vpn_nm_plugins closes that gap for the plugins by
+  # matching network-manager-* as a pattern; the standalone clients at the end of
+  # the list close the other obvious route, which is that this host now has a
+  # desktop, a terminal and full apt access through the tunnel, so `apt install
+  # openvpn` is one command away from anyone sitting at it.
+  #
+  # The trailing sentinel distinguishes "scanned, found nothing" from "the scan
+  # never ran": an ssh failure prints nothing at all, which would otherwise be
+  # indistinguishable from a clean host and would score as a pass.
+  #
+  # Three independent faults are guarded here, and none of them may be inferred
+  # from either of the others:
+  #   - transport failure (ssh/the jump never delivered the command at all) --
+  #     caught by the `__vpnscan=done` sentinel, unconditional because it is
+  #     written after `;`, not `&&`.
+  #   - dpkg-query never ran (missing binary, unreadable status DB) -- caught
+  #     by requiring `base-files`, present on every Debian/Kali install, to
+  #     show up in the dump with a real status.
+  #   - dpkg-query STARTED but died partway through (crash, OOM, a resource
+  #     limit) -- the pipe still closes cleanly and the unconditional sentinel
+  #     still fires, so neither of the above two faults would catch it.
+  #     `base-files` cannot be pinned to "ran to completion" either by putting
+  #     it first in the argument list: dpkg-query iterates its status database
+  #     in alphabetical order regardless of argv order, so it is always
+  #     emitted early no matter where it is asked for -- argument position is
+  #     not a lever here. This is why the dump below takes NO package
+  #     arguments at all and is filtered locally instead: with nothing named on
+  #     the command line there is nothing that can be "not found", so
+  #     dpkg-query's own exit status becomes meaningful again, captured
+  #     immediately afterwards (nothing piped in between) as `__rc=$?`. Only
+  #     `__rc=0` counts as a completed run.
+  #
+  # Filtering locally, in this shell, rather than through an awk pipeline sent
+  # over ssh also means every NAMED package below is matched by exact field
+  # equality against dpkg's own output -- never a substring -- so one package
+  # name can never be spoofed by another. The single deliberate exception is
+  # vpn_nm_plugins, which is a prefix match by design and errs toward reporting.
+  # This list mirrors the purge list in the workstation role's desktop.yaml, and
+  # the mirroring is the point: the role removes them, this asserts they stayed
+  # removed. The standalone clients matter as much as the plugins -- a
+  # NetworkManager plugin is a GUI in front of a binary that outlives it, and
+  # this guest was measured carrying working openvpn, openconnect, vpnc, pptp
+  # and strongswan binaries with every plugin already gone.
+  #
+  # strongswan is named the way it is actually installed (the daemon packages)
+  # AND as the metapackage, which is not installed today but would be on an image
+  # that pulls it.
+  vpn_watch_list="mullvad-vpn \
+      network-manager-openvpn network-manager-openvpn-gnome \
+      network-manager-pptp network-manager-pptp-gnome \
+      network-manager-l2tp network-manager-l2tp-gnome \
+      network-manager-openconnect network-manager-openconnect-gnome \
+      network-manager-vpnc network-manager-vpnc-gnome \
+      network-manager-fortisslvpn network-manager-fortisslvpn-gnome \
+      openvpn openconnect vpnc vpnc-scripts pptp-linux \
+      wireguard wireguard-tools \
+      strongswan strongswan-starter strongswan-charon strongswan-libcharon \
+      libcharon-extauth-plugins libstrongswan libstrongswan-standard-plugins"
+
+  vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' 2>/dev/null; echo __rc=\$?; echo __vpnscan=done" \
+      2>/dev/null | tr -d '\r' || true)"
+  if ! grep -q '__vpnscan=done' <<<"$vpn_scan"; then
+    note_fail "the VPN-client scan did not run on ${short}; cannot assert credentials are gateway-only"
+  else
+    vpn_rc="$(sed -n 's/^__rc=\([0-9][0-9]*\)$/\1/p' <<<"$vpn_scan" | tail -1 || true)"
+    # grep -v exits 1, not 0, when every line matches the exclusion (i.e. the
+    # dump has nothing left in it but the two marker lines) -- exactly the
+    # fault case this code exists to handle, so it must not be allowed to trip
+    # `set -e` and abort the whole run.
+    vpn_dump="$(grep -vE '^__rc=[0-9]+$|^__vpnscan=done$' <<<"$vpn_scan" || true)"
+    if [[ "$vpn_rc" != "0" ]]; then
+      note_fail "the VPN-client scan on ${short} did not complete (dpkg-query exited ${vpn_rc:-unknown} instead of 0); credential-isolation cannot be asserted"
+    elif ! vpn_pkg_present "$vpn_dump" "base-files"; then
+      note_fail "the VPN-client scan on ${short} did not observe its own canary package (base-files) as installed; dpkg-query may not have actually read the status database, so credential-isolation cannot be asserted"
+    else
+      vpn_found=""
+      for pkg in $vpn_watch_list; do
+        vpn_pkg_present "$vpn_dump" "$pkg" && vpn_found="${vpn_found}${pkg} "
+      done
+      # ...and then the same dump again, by pattern, for the plugins no list can
+      # know about. No extra round trip: the full dump is already here. The
+      # dedupe keeps a package that is both named above and matched here from
+      # being reported twice.
+      for pkg in $(vpn_nm_plugins "$vpn_dump"); do
+        case " ${vpn_found}" in
+          *" ${pkg} "*) continue ;;
+        esac
+        vpn_found="${vpn_found}${pkg} "
+      done
+      vpn_found="${vpn_found% }"
+      if [[ -n "$vpn_found" ]]; then
+        note_fail "${short} has VPN client package(s) installed, which an internal-only host must never have: ${vpn_found}"
+      else
+        ok "${short} has no VPN client installed: none of the named clients, and no network-manager-* plugin beyond the desktop's own (credentials stay on the gateway)"
+      fi
+    fi
+  fi
+
+  # 4. Positive controls for the tools the leak checks rely on. A bash built
   # without /dev/tcp, or a ping that cannot do IPv6, fails a probe in exactly the
   # same way a blocked packet does -- which would make the corresponding leak
   # check permanently, silently green.
@@ -318,7 +506,7 @@ while read -r short role vm_idx; do
     "ping6 control"
 
   if [[ "$PHASE" == "1" ]]; then
-    # 4. Isolation: no path off the segment. ICMP to a public address, then a TCP
+    # 5. Isolation: no path off the segment. ICMP to a public address, then a TCP
     # connect, because a dropped ping alone would not rule out a working route.
     expect_blocked "$(ws_probe "$ip" "ping -c1 -W3 1.1.1.1 >/dev/null 2>&1")" \
       "${short} has no ICMP path to the internet (correct for Phase 1)" \
