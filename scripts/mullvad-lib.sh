@@ -222,17 +222,53 @@ MULLVAD_RELAY_CACHE="${GEN_DIR}/mullvad-relays.json"
 MULLVAD_PIN_FILE="${GEN_DIR}/mullvad-exit.chosen"
 MULLVAD_CACHE_MAX_AGE_DAYS=7
 
-# True if <cache> exists and is younger than <days>. `find -mtime +N` counts
-# whole 24-hour periods, which is exactly the granularity wanted here.
+# True if <cache> exists, is non-empty, and is younger than <days>. `find
+# -mtime +N` counts whole 24-hour periods, which is exactly the granularity
+# wanted here.
+#
+# -s, not -e: this is reachable with a 0-byte file whenever something failed
+# partway through writing it -- an interrupted `mv`, ENOSPC, a `mv` across
+# filesystems when TMPDIR and the cache live on different volumes. A 0-byte
+# file must never read as "fresh"; the whole point of this check is deciding
+# whether the content on disk can be trusted, and mtime alone says nothing
+# about that.
 mullvad_cache_fresh() {
   local cache="${1:?}" days="${2:?}"
-  # -e, not -s: this is an mtime freshness check, not a content check. A cache
-  # only ever reaches disk via mullvad_load_relays' own mv below, which already
-  # requires the JSON to parse as a non-empty list -- an empty file cannot occur
-  # there. Using -s here would make a just-created (0-byte) cache read as
-  # "not fresh", which is only reachable in a test fixture, but wrong all the same.
-  [[ -e "$cache" ]] || return 1
+  [[ -s "$cache" ]] || return 1
   [[ -z "$(find "$cache" -mtime +"$days" -print 2>/dev/null)" ]]
+}
+
+# True if <file> parses as Mullvad's relay list shape: a non-empty JSON array.
+# Every path a relay cache can reach -- a fresh fetch, a cache we're about to
+# reuse, a stale cache we're about to fall back to -- runs through the same
+# check, so "corrupt" means the same thing everywhere: a truncated copy, a
+# 0-byte file, or content carried over from another machine all fail the same
+# way instead of three different ones. Exceptions are caught rather than left
+# to propagate, so a bad file produces a clean 1, not a Python traceback on
+# the operator's terminal.
+_mullvad_relays_valid() {
+  python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, list) and d else 1)
+' "${1:?}" 2>/dev/null
+}
+
+# Fetch the raw relay list into <dest>. Split out from mullvad_load_relays so
+# tests can redefine this one function after sourcing the library and drive
+# every path -- fetch succeeds, fails, times out -- without a real network
+# request; production never overrides it, so `make preflight` always hits the
+# real API here.
+#
+# curl's own stderr is NOT redirected: -fsS still prints curl's error line
+# (a captive portal, a TLS-intercepting proxy, DNS failure) on failure, and
+# throwing that away would leave the operator with only "could not fetch",
+# no clue which of those it was.
+_mullvad_fetch_relays() {
+  curl -fsS --max-time 30 "$MULLVAD_RELAY_URL" -o "${1:?}"
 }
 
 # Make sure the relay cache is present and parseable.
@@ -242,28 +278,35 @@ mullvad_cache_fresh() {
 # endpoint every Mullvad user queries, and the 7-day cache keeps it rare, but it
 # is real-IP traffic and the README says so.
 #
-# A stale cache is used with a visible warning; NO cache and no network is fatal.
-# Guessing a multihop port would produce a tunnel that silently exits somewhere
-# the operator did not choose, which is worse than not building.
+# A cache is only ever trusted after it parses -- fresh or stale, on disk or
+# just fetched. A cache that fails that check is treated exactly like a
+# missing one: refetch, and if the refetch also fails, that's fatal. Guessing
+# a multihop port, or silently building against a corrupt relay list, would
+# produce a tunnel that exits somewhere the operator did not choose, which is
+# worse than not building.
 mullvad_load_relays() {
   local cache="${1:-$MULLVAD_RELAY_CACHE}" days="${2:-$MULLVAD_CACHE_MAX_AGE_DAYS}" tmpf
   if mullvad_cache_fresh "$cache" "$days"; then
-    log "Using cached Mullvad relay list ($(basename "$cache"))"
-    return 0
+    if _mullvad_relays_valid "$cache"; then
+      log "Using cached Mullvad relay list ($(basename "$cache"))"
+      return 0
+    fi
+    warn "Cached relay list at ${cache} is fresh but does not parse as a relay list; refetching."
   fi
   mkdir -p "$(dirname "$cache")"
   tmpf="$(mktemp)"
   log "Fetching the Mullvad relay list (public API, over your real IP)"
-  if curl -fsS --max-time 30 "$MULLVAD_RELAY_URL" -o "$tmpf" 2>/dev/null \
-     && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d,list) and d else 1)' "$tmpf"; then
+  if _mullvad_fetch_relays "$tmpf" && _mullvad_relays_valid "$tmpf"; then
     mv "$tmpf" "$cache"
     ok "Relay list cached ($(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$cache") relays)"
     return 0
   fi
   rm -f "$tmpf"
-  [[ -s "$cache" ]] \
-    || die "Could not fetch ${MULLVAD_RELAY_URL} and no cached relay list exists at ${cache}. The exit's multihop port comes from that list and must not be guessed."
-  warn "Could not refresh the relay list; using the cached copy from $(date -r "$cache" '+%Y-%m-%d %H:%M')."
+  if _mullvad_relays_valid "$cache"; then
+    warn "Could not refresh the relay list; using the cached copy from $(date -r "$cache" '+%Y-%m-%d %H:%M')."
+    return 0
+  fi
+  die "Could not fetch ${MULLVAD_RELAY_URL} and no usable cached relay list exists at ${cache}. The exit's multihop port comes from that list and must not be guessed."
 }
 
 # Write the derived multihop config to <dest> at mode 0600.

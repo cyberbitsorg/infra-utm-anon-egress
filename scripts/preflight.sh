@@ -94,12 +94,11 @@ if [[ -n "${MULLVAD_EXIT:-}" ]]; then
             "$MULLVAD_EXIT" "${MULLVAD_ENTRY:-}" "$MULLVAD_PIN_FILE")" \
     || die "Could not resolve an exit (reason above). Fix .env or secrets/ before 'make up'."
   entry_host="${pair%% *}"; exit_host="${pair##* }"
-  # Re-asserted here even though mullvad_resolve_pair already checked it: a pin
-  # written by an older version, or a relay whose multihop_port Mullvad changed,
-  # must not survive into a build. This is the gate, so it checks rather than
-  # trusts.
-  mullvad_assert_multihop "$MULLVAD_RELAY_CACHE" "$entry_host" "$exit_host" \
-    || die "The resolved pair is not multihop (reason above)."
+  # NOT re-asserted here: every return path out of mullvad_resolve_pair --
+  # fresh pick or reused pin -- already runs through mullvad_assert_multihop
+  # itself (mullvad_pair_ok calls it for a reused pin; the fresh-pick path
+  # calls it directly before writing the pin). A second call here can never
+  # fire its die and only costs three more python3 spawns per preflight.
   wg_derived="$(mktemp)"
   trap 'rm -f "${wg_derived:-}"' EXIT
   mullvad_render_to "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \

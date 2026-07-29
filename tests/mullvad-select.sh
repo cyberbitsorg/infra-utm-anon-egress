@@ -216,19 +216,112 @@ mullvad_resolve_pair "$J" "$S" bg bg "$PIN" >/dev/null 2>&1 \
   && note "an entry spec confined to the exit's own country must fail"
 
 echo "mullvad_cache_fresh:"
-touch "${tmp}/fresh.json"
-mullvad_cache_fresh "${tmp}/fresh.json" 7 || note "a just-touched cache must be fresh"
+# A relay cache is never 0 bytes on a real machine (mullvad_load_relays only
+# ever mv's a JSON-validated file into place), but the check itself must not
+# rely on that: it has to say "not fresh" for a 0-byte file on its own, since
+# that is exactly the shape an interrupted mv or a full disk leaves behind.
+# So the fixtures here are valid JSON, not `touch`ed placeholders -- a fixture
+# that cannot occur in reality would let a content-blind check (-e) pass this
+# test for the wrong reason.
+cat > "${tmp}/fresh.json" <<'EOF'
+[{"hostname":"se-sto-wg-001","active":true,"ipv4_addr_in":"185.213.154.70","multihop_port":3301,"country_code":"se","city_code":"sto"}]
+EOF
+mullvad_cache_fresh "${tmp}/fresh.json" 7 || note "a just-written cache must be fresh"
 mullvad_cache_fresh "${tmp}/missing.json" 7 && note "a missing cache must not be fresh"
 # 8 days old against a 7-day limit.
+cp "${tmp}/fresh.json" "${tmp}/old.json"
 touch -t "$(date -v-8d +%Y%m%d%H%M 2>/dev/null || date -d '8 days ago' +%Y%m%d%H%M)" "${tmp}/old.json"
 mullvad_cache_fresh "${tmp}/old.json" 7 && note "an 8-day-old cache must not be fresh against a 7-day limit"
+# A 0-byte file must never read as fresh, whatever its mtime: this is the
+# exact shape an interrupted mv or ENOSPC leaves behind, and a stale-but-
+# nonempty cache must still self-heal via mullvad_load_relays' own validity
+# check rather than this mtime-only predicate silently vouching for content.
+: > "${tmp}/empty.json"
+mullvad_cache_fresh "${tmp}/empty.json" 7 && note "a 0-byte cache must never read as fresh"
+
+echo "mullvad_load_relays:"
+# Stub the network fetch so these tests never touch the real API.
+# _mullvad_fetch_relays is the seam mullvad-lib.sh provides for exactly this:
+# production always calls it unmodified, tests redefine it after sourcing.
+#
+# The call counter is a FILE, not a shell variable: the "expect die" cases
+# below must run inside a `$(...)` command substitution (die calls `exit`,
+# which would kill this whole test script if invoked as a bare statement in
+# the current shell), and a command substitution is a subshell -- any plain
+# variable a stub increments there is gone the moment it exits. A file write
+# is real I/O and survives across that boundary.
+calls="${tmp}/fetch-calls"
+fetch_call_count() { wc -l < "$calls" 2>/dev/null | tr -d ' '; }
+
+echo "  no cache, fetch fails -> fatal:"
+rm -f "$calls"
+_mullvad_fetch_relays() { echo x >> "$calls"; return 1; }
+if out="$(mullvad_load_relays "${tmp}/no-cache.json" 7 2>&1)"; then
+  note "no cache + a failing fetch must be fatal, but mullvad_load_relays returned 0"
+else
+  [[ "$out" == *"Could not fetch"* ]] \
+    || note "the fatal message must say the fetch failed (got '${out}')"
+fi
+[[ "$(fetch_call_count)" -eq 1 ]] \
+  || note "a missing cache must trigger exactly one fetch attempt (got $(fetch_call_count))"
+[[ -e "${tmp}/no-cache.json" ]] \
+  && note "a failed fetch with no prior cache must not leave a cache file behind"
+
+echo "  stale but valid cache, fetch fails -> warns and continues:"
+cat > "${tmp}/stale-valid.json" <<'EOF'
+[{"hostname":"se-sto-wg-001","active":true,"ipv4_addr_in":"185.213.154.70","multihop_port":3301,"country_code":"se","city_code":"sto"}]
+EOF
+touch -t "$(date -v-8d +%Y%m%d%H%M 2>/dev/null || date -d '8 days ago' +%Y%m%d%H%M)" "${tmp}/stale-valid.json"
+rm -f "$calls"
+_mullvad_fetch_relays() { echo x >> "$calls"; return 1; }
+if out="$(mullvad_load_relays "${tmp}/stale-valid.json" 7 2>&1)"; then
+  [[ "$out" == *"Could not refresh"* ]] \
+    || note "a stale cache with a failing refetch must warn that it could not refresh (got '${out}')"
+else
+  note "a stale-but-valid cache must let the build continue when the refetch fails (mullvad_load_relays died instead)"
+fi
+[[ "$(fetch_call_count)" -eq 1 ]] \
+  || note "a stale cache must still attempt exactly one refetch (got $(fetch_call_count))"
+[[ "$(mullvad_relay_field "${tmp}/stale-valid.json" se-sto-wg-001 country_code)" == "se" ]] \
+  || note "the stale cache's own content must survive on disk when the refetch fails"
+
+echo "  corrupt cache (fresh by mtime), fetch succeeds -> refetch attempted and used:"
+echo 'not json' > "${tmp}/corrupt-fresh.json"
+rm -f "$calls"
+_mullvad_fetch_relays() {
+  echo x >> "$calls"
+  cat > "${1:?}" <<'EOF'
+[{"hostname":"nl-ams-wg-001","active":true,"ipv4_addr_in":"92.60.40.10","multihop_port":3401,"country_code":"nl","city_code":"ams"}]
+EOF
+}
+mullvad_load_relays "${tmp}/corrupt-fresh.json" 7 >/dev/null 2>&1 \
+  || note "a corrupt-but-fresh cache must self-heal via refetch when the fetch succeeds, not fail"
+[[ "$(fetch_call_count)" -eq 1 ]] \
+  || note "a corrupt cache must trigger exactly one refetch even though it is 'fresh' by mtime (got $(fetch_call_count))"
+[[ "$(mullvad_relay_field "${tmp}/corrupt-fresh.json" nl-ams-wg-001 country_code)" == "nl" ]] \
+  || note "the refetched content must actually replace the corrupt cache on disk"
+
+echo "  corrupt cache (fresh by mtime), fetch also fails -> fatal:"
+echo 'not json' > "${tmp}/corrupt-fresh-2.json"
+rm -f "$calls"
+_mullvad_fetch_relays() { echo x >> "$calls"; return 1; }
+if out="$(mullvad_load_relays "${tmp}/corrupt-fresh-2.json" 7 2>&1)"; then
+  note "a corrupt cache must never be trusted just because its mtime is new, even when the refetch also fails"
+fi
+[[ "$(fetch_call_count)" -eq 1 ]] \
+  || note "a corrupt fresh cache must still attempt exactly one fetch before giving up (got $(fetch_call_count))"
 
 echo "mullvad_render_to:"
 mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived.conf"
 [[ "$(grep -c '^Endpoint = 185.213.154.70:3225$' "${tmp}/derived.conf")" -eq 1 ]] \
   || note "the derived config must point at the entry ip and the exit multihop port"
-[[ "$(stat -f '%Lp' "${tmp}/derived.conf")" == "600" ]] \
-  || note "the derived config holds a private key and must be mode 600"
+# The mode check must not pass by accident of the ambient umask: force a loose
+# one around a second render so a missing `chmod 600` in the implementation
+# would actually be caught rather than masked by a restrictive umask already
+# in effect (e.g. 077, which would leave the file at 600 with no chmod at all).
+( umask 022; mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived-umask.conf" )
+[[ "$(stat -f '%Lp' "${tmp}/derived-umask.conf")" == "600" ]] \
+  || note "the derived config holds a private key and must be mode 600 regardless of umask"
 diff <(grep -v '^Endpoint' "${S}/bg-sof-wg-001.conf") <(grep -v '^Endpoint' "${tmp}/derived.conf") >/dev/null \
   || note "the derived config must differ from the exit's config only in Endpoint"
 
