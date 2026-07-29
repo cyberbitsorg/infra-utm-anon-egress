@@ -185,6 +185,35 @@ for i in $(seq 1 25); do
   fi
 done
 
+echo "mullvad_resolve_pair (the exit's country sorts LAST):"
+# A second fixture, and the reason for it is one line of arithmetic: a `while`
+# loop reports the status of its LAST iteration. The entry pre-filter walks the
+# candidate list in sorted order, so when the alphabetically last active relay
+# happens to be in the exit's own country, the loop's final `[[ ... ]] && printf`
+# is false, the loop returns 1, and under `set -o pipefail` the whole command
+# substitution fails -- even though a legal entry was already chosen and
+# printed. The operator is then told no entry exists, which is the opposite of
+# true, and which relay sorts last is pure alphabetical luck: against the live
+# relay list this made every South African exit unbuildable while 537 legal
+# entries sat in the list.
+#
+# So: exactly two relays, the exit's own country last, one legal entry.
+cat > "${tmp}/tail.json" <<'EOF'
+[
+ {"hostname":"aa-xxx-wg-001","active":true,"ipv4_addr_in":"10.9.0.1","multihop_port":3001,"country_code":"aa","city_code":"xxx"},
+ {"hostname":"zz-yyy-wg-001","active":true,"ipv4_addr_in":"10.9.0.2","multihop_port":3002,"country_code":"zz","city_code":"yyy"}
+]
+EOF
+mkdir -p "${tmp}/secrets-tail"
+cp "${tmp}/exit.conf" "${tmp}/secrets-tail/zz-yyy-wg-001.conf"
+rm -f "${tmp}/chosen-tail"
+if got="$(mullvad_resolve_pair "${tmp}/tail.json" "${tmp}/secrets-tail" zz "" "${tmp}/chosen-tail" 2>/dev/null)"; then
+  [[ "$got" == "aa-xxx-wg-001 zz-yyy-wg-001" ]] \
+    || note "the only legal entry must be chosen (got '${got}')"
+else
+  note "an exit whose country sorts last must still resolve: aa-xxx-wg-001 is a legal entry, but the pre-filter loop returned the status of its last iteration (zz-yyy-wg-001, the exit's own country) and pipefail turned that into 'no entry matches'"
+fi
+
 echo "mullvad_resolve_pair:"
 rm -f "$PIN"
 got="$(mullvad_resolve_pair "$J" "$S" bg "" "$PIN")"

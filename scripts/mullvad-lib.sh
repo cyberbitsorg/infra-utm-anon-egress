@@ -159,6 +159,30 @@ mullvad_entry_candidates() {
   mullvad_relay_match "${1:?relay json required}" "${2-}"
 }
 
+# Entry candidates that are NOT in <country_code>. The second hop only buys
+# anything in another jurisdiction, so the pool is filtered here rather than the
+# draw checked afterwards.
+#
+# A function ending in an explicit `return 0`, exactly like
+# mullvad_exit_candidates and for exactly the same reason: a `while` loop
+# reports the status of its LAST iteration, so a final candidate that IS in the
+# exit's country makes the loop return 1. Inline in a pipeline under
+# `set -o pipefail` that failed the whole command substitution even though a
+# legal entry had already been chosen and printed, and told the operator no
+# entry existed -- for every exit whose country sorts last in the relay list
+# (`za` against the live list, while 537 legal entries sat in it). The status of
+# this filter is a property of the filter, never of whichever relay happened to
+# be examined last.
+mullvad_entries_outside_country() {
+  local json="${1:?}" spec="${2-}" exclude_cc="${3:?}" h
+  mullvad_entry_candidates "$json" "$spec" | while IFS= read -r h; do
+    [[ -n "$h" ]] || continue
+    [[ "$(mullvad_relay_field "$json" "$h" country_code)" != "$exclude_cc" ]] && printf '%s\n' "$h"
+  done
+  return 0
+}
+
+
 # Is this exact pair still legal under the current .env? Silent by design: it is
 # a predicate used to decide whether to keep a pin, not a validator whose reasons
 # the operator needs to read.
@@ -201,11 +225,7 @@ mullvad_resolve_pair() {
 
   # The entry must be in a different country: that is the whole point of the
   # second hop, so it is filtered here rather than checked afterwards.
-  entry="$(mullvad_entry_candidates "$json" "$entry_spec" \
-           | while IFS= read -r h; do
-               [[ -n "$h" ]] || continue
-               [[ "$(mullvad_relay_field "$json" "$h" country_code)" != "$exit_cc" ]] && printf '%s\n' "$h"
-             done \
+  entry="$(mullvad_entries_outside_country "$json" "$entry_spec" "$exit_cc" \
            | mullvad_pick_random)" || {
     echo "No entry server matches MULLVAD_ENTRY='${entry_spec}' outside the exit's country '${exit_cc}'. Leave MULLVAD_ENTRY empty for any country, or name a different one." >&2
     return 1
