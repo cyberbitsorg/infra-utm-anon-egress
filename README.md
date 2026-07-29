@@ -270,15 +270,23 @@ it decides whether any of this means anything:
 
 - Pay with **Monero or cash**. Not iDEAL, not a card — a bank-linked payment ties
   the account to your identity and defeats the entire exercise.
-- Generate a **multihop** WireGuard config on Mullvad's site (entry server in one
-  country, exit in another), save it somewhere outside this repo, `chmod 600` it.
-- Point `MULLVAD_WG_CONFIG` in `.env` at that file. The whole config is the
-  artifact, so no keys are ever transcribed by hand.
+- Generate WireGuard configs on Mullvad's site. **Every config their generator
+  emits is single-hop**, one per server — there is no multihop option to tick.
+  Getting a second hop is a change you or this repo makes afterwards.
+- Then pick one of two ways to get there, and set exactly one of them in `.env`
+  (they are mutually exclusive, and setting both is refused):
+  - **`MULLVAD_EXIT`** — drop the downloaded configs into `secrets/` as
+    `<hostname>.conf` and name the exit country. The build assembles multihop
+    for you; see "Choosing the exit country" below. This is the easier path and
+    the one `make verify` can check.
+  - **`MULLVAD_WG_CONFIG`** — point it at a multihop config you assembled
+    yourself, saved outside this repo and `chmod 600`. The whole config is the
+    artifact, so no keys are ever transcribed by hand.
 
 The endpoint **must be an IP address, not a hostname**. Resolving a hostname to
 bring the tunnel up would need clear-net DNS before the tunnel exists — a leak by
-construction. `make preflight` validates the file and tells you exactly what is
-wrong if it is not usable.
+construction. `make preflight` validates the config it is going to use, either
+way, and tells you exactly what is wrong if it is not usable.
 
 The config is sanitised before it ever reaches the gateway: the `DNS =` line is
 stripped (unbound owns DNS), IPv6 addresses are removed, and any `PostUp` /
@@ -299,9 +307,13 @@ config generator will hand you every server at once; drop them in.
 
 **The build assembles multihop for you.** A Mullvad multihop config is the exit
 server's own config with one line changed — `Endpoint = <entry ip>:<exit
-multihop port>` — and that is exactly what preflight writes, to a `0600` temp
-file that never persists. The entry sees your real IP but not your destination;
-the exit sees your destination but not your IP.
+multihop port>` — and that is exactly what the build writes, to a `0600` temp
+file that never persists. It is assembled twice: `make preflight` builds one to
+validate it and throws it away, and the copy that actually reaches the gateway
+is assembled during `make up` / `make configure` from the same pinned pair.
+(`make configure` never runs preflight, so it cannot rely on it.) The entry sees
+your real IP but not your destination; the exit sees your destination but not
+your IP.
 
 **Single-hop is refused, not discouraged.** The build fails before any VM exists
 if entry and exit are the same server, share a country, or resolve to port
@@ -317,14 +329,22 @@ Editing `MULLVAD_EXIT` discards the pin on the next run.
 `am.i.mullvad.net` reports against the pinned one and fails if they differ.
 Egressing via *some* Mullvad exit was never the claim worth making.
 
-**One fetch happens over your real IP.** Selecting a server needs Mullvad's
-public relay list (`https://api.mullvad.net/www/relays/wireguard/`), which is
-fetched from your Mac before the lab exists — there is no tunnel to use yet. It
-is cached in `generated/` for 7 days. If you would rather not make that request
-at all, use `MULLVAD_WG_CONFIG` with a config you assembled yourself.
+**A fetch happens over your real IP.** Selecting a server needs Mullvad's public
+relay list (`https://api.mullvad.net/www/relays/wireguard/`), and it is fetched
+from your Mac, not through the tunnel — during `make up` there is no tunnel to
+use yet. It is cached in `generated/` for 7 days. Note that `make configure`
+needs the list too (it assembles the config itself, and never runs preflight),
+so a configure-only run against a cache older than 7 days makes that same
+real-IP request even though the lab is already up and the tunnel is working. If
+you would rather not make the request at all, use `MULLVAD_WG_CONFIG` with a
+config you assembled yourself.
 
 `MULLVAD_EXIT` and `MULLVAD_WG_CONFIG` are mutually exclusive; setting both is
-refused rather than resolved by precedence.
+refused rather than resolved by precedence. Switching between them is fine, but
+`make verify` reads `.env` to know which one built the lab: with `MULLVAD_EXIT`
+set it demands a readable pin and fails without one, and with only
+`MULLVAD_WG_CONFIG` set it says out loud that the country check does not apply
+and ignores any pin left over from an earlier lab.
 
 ### When the tunnel is down, nothing moves
 

@@ -325,5 +325,105 @@ mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived.conf"
 diff <(grep -v '^Endpoint' "${S}/bg-sof-wg-001.conf") <(grep -v '^Endpoint' "${tmp}/derived.conf") >/dev/null \
   || note "the derived config must differ from the exit's config only in Endpoint"
 
+echo "verify.sh exit-country assertion:"
+# This is verify.sh's decision logic, not mullvad-lib.sh's, but it lives here
+# because it is the same feature and this is the suite that already has the
+# vocabulary for it.
+#
+# The block is EXTRACTED from scripts/verify.sh between its markers rather than
+# copied into this file. A copy would drift: someone weakens the production
+# assertion, the copy here still passes, and the suite reports green on exactly
+# the check that stopped working. Extracting means a change to the production
+# text is a change to what these cases run.
+BLOCK="${tmp}/exit-assertion.sh"
+awk '/# >>> exit-country assertion/{f=1;next} /# <<< exit-country assertion/{f=0} f' \
+  scripts/verify.sh > "$BLOCK"
+[[ -s "$BLOCK" ]] \
+  || note "could not extract the exit-country assertion from scripts/verify.sh -- did the >>> / <<< markers move?"
+grep -q 'MULLVAD_PIN_FILE' "$BLOCK" \
+  || note "the assertion must locate the pin via \$MULLVAD_PIN_FILE; a second hardcoded path would let a rename switch the whole check off unnoticed"
+
+# Run the extracted block with the four inputs it actually branches on, under
+# the same `set -euo pipefail` verify.sh runs with (so a block that aborts on a
+# missing pin is caught here rather than in production). ok/note_fail/log are
+# stubbed to a flat transcript; the last line is the failure count.
+#
+# MULLVAD_PIN_FILE is repointed into $tmp: this test must never read or write
+# the operator's real generated/mullvad-exit.chosen.
+run_exit_assertion() {
+  local host="$1" mx="$2" pin="$3"
+  (
+    fails=0
+    short="workstation"
+    exit_host="$host"
+    MULLVAD_EXIT="$mx"
+    MULLVAD_PIN_FILE="${tmp}/verify-pin"
+    rm -f "$MULLVAD_PIN_FILE"
+    if [[ "$pin" != "__nopin__" ]]; then printf '%s' "$pin" > "$MULLVAD_PIN_FILE"; fi
+    ok()        { printf 'OK %s\n' "$*"; }
+    note_fail() { printf 'FAIL %s\n' "$*"; fails=$((fails + 1)); }
+    log()       { printf 'LOG %s\n' "$*"; }
+    # shellcheck disable=SC1090
+    source "$BLOCK"
+    printf 'fails=%d\n' "$fails"
+  )
+}
+
+GOODPIN=$'jp-osa-wg-103 bg-sof-wg-001\n'
+
+# 1. The observed exit is the pinned one: the only case that may pass.
+out="$(run_exit_assertion bg-sof-wg-001 bg "$GOODPIN")"
+[[ "$out" == *"fails=0"* ]] || note "a matching exit must not fail (got '${out}')"
+[[ "$out" == *"exit that was selected (bg-sof-wg-001)"* ]] \
+  || note "a matching exit must say so explicitly (got '${out}')"
+
+# 2. The tunnel is in a country the operator did not choose. This is the whole
+# reason the assertion exists, and it must name BOTH hostnames so the message
+# says what happened rather than that something is wrong.
+out="$(run_exit_assertion nl-ams-wg-001 bg "$GOODPIN")"
+[[ "$out" == *"fails=1"* ]] \
+  || note "an exit that differs from the pinned one MUST fail (got '${out}')"
+[[ "$out" == *"nl-ams-wg-001"* && "$out" == *"bg-sof-wg-001"* ]] \
+  || note "the mismatch message must name both the observed and the selected exit (got '${out}')"
+
+# 3-5. MULLVAD_EXIT is set, so a country WAS chosen, but the pin cannot answer
+# whether it was honoured. Missing, empty and truncated pins are all "could not
+# tell", and this suite's rule is that could-not-tell is a failure. A silent
+# skip here is the failure mode that matters: delete the pin and an otherwise
+# green run would stop checking the country without saying a word.
+for case_name in missing empty truncated; do
+  case "$case_name" in
+    missing)   pin="__nopin__" ;;
+    empty)     pin="" ;;
+    truncated) pin=$'jp-osa-wg-103\n' ;;
+  esac
+  out="$(run_exit_assertion bg-sof-wg-001 bg "$pin")"
+  [[ "$out" == *"fails=1"* ]] \
+    || note "a ${case_name} pin with MULLVAD_EXIT set must FAIL, not silently skip the country check (got '${out}')"
+  [[ "$out" == *"MULLVAD_EXIT="* ]] \
+    || note "the ${case_name}-pin failure must say the operator asked for a specific exit (got '${out}')"
+done
+
+# 6. Mullvad confirmed an exit but named no hostname: comparable to nothing.
+out="$(run_exit_assertion "" bg "$GOODPIN")"
+[[ "$out" == *"fails=1"* ]] \
+  || note "an unreadable exit hostname must fail rather than pass by omission (got '${out}')"
+
+# 7. Not applicable, and said out loud. A MULLVAD_WG_CONFIG lab is correct even
+# with a pin left behind by an earlier MULLVAD_EXIT lab -- only `make destroy`
+# clears it -- so applying that pin would fail a good lab while naming a country
+# nobody asked for. It must be ignored, and the transcript must still show the
+# check was considered: an absent line and a disabled check look identical.
+out="$(run_exit_assertion nl-ams-wg-001 "" "$GOODPIN")"
+[[ "$out" == *"fails=0"* ]] \
+  || note "a stale pin must not fail a MULLVAD_WG_CONFIG lab (got '${out}')"
+[[ "$out" == *"does not apply"* ]] \
+  || note "a lab with no MULLVAD_EXIT must SAY the country check does not apply, not skip in silence (got '${out}')"
+
+# 8. Same, with no pin at all: the ordinary MULLVAD_WG_CONFIG case.
+out="$(run_exit_assertion nl-ams-wg-001 "" "__nopin__")"
+[[ "$out" == *"fails=0"* && "$out" == *"does not apply"* ]] \
+  || note "a MULLVAD_WG_CONFIG lab with no pin must pass and say the check does not apply (got '${out}')"
+
 [[ "$fail" -eq 0 ]] && echo "mullvad-select: OK"
 exit "$fail"
