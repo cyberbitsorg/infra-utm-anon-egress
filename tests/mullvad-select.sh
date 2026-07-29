@@ -319,6 +319,34 @@ mullvad_resolve_pair "$J" "$S" zz "" "$PIN" >/dev/null 2>&1 \
 mullvad_resolve_pair "$J" "$S" bg bg "$PIN" >/dev/null 2>&1 \
   && note "an entry spec confined to the exit's own country must fail"
 
+echo "mullvad_resolve_pair (a pin that was legal and no longer is):"
+# Both pins below survive BOTH of mullvad_pair_ok's candidate checks -- the
+# pinned exit still matches MULLVAD_EXIT and still has a config on disk, the
+# pinned entry still matches MULLVAD_ENTRY -- so the only thing that can reject
+# them is the mullvad_assert_multihop call on the reuse path.
+#
+# That call is load-bearing beyond this function: preflight.sh deliberately does
+# NOT re-assert multihop, on the stated grounds that every return path out of
+# mullvad_resolve_pair already has. Drop it and an illegal pin passes preflight
+# and is caught only by up.sh's backstop -- i.e. after the VMs exist, which is
+# precisely what "single-hop must fail before any VM is created" forbids. These
+# two cases are what keeps that comment true.
+PIN_SAME="${tmp}/chosen-same-country"
+printf 'bg-sof-wg-002 bg-sof-wg-001\n' > "$PIN_SAME"
+mullvad_resolve_pair "$J" "$S" bg bg "$PIN_SAME" >/dev/null 2>&1 \
+  && note "a pinned pair whose entry and exit are both in 'bg' must be discarded on reuse: matching the specs is not the same as being multihop"
+
+# The relay list moved under an old pin: the pinned exit's multihop_port is now
+# 51820, which is Mullvad's single-hop port. Its own secrets dir so the fixture
+# secrets/ used everywhere else keeps having no se config at all.
+S_SINGLE="${tmp}/secrets-singlehop"
+mkdir -p "$S_SINGLE"
+cp "${tmp}/exit.conf" "${S_SINGLE}/se-got-wg-001.conf"
+PIN_SINGLE="${tmp}/chosen-singlehop"
+printf 'nl-ams-wg-001 se-got-wg-001\n' > "$PIN_SINGLE"
+mullvad_resolve_pair "$J" "$S_SINGLE" se-got "" "$PIN_SINGLE" >/dev/null 2>&1 \
+  && note "a pinned exit that now resolves to port ${MULLVAD_SINGLEHOP_PORT} must be discarded on reuse, not kept because the hostnames still match"
+
 echo "mullvad_pair_ok (where the pin sits in the list must not matter):"
 # bg-sof-wg-001 is the FIRST of the seven sorted entry candidates, which is the
 # case a `candidates | grep -q "$entry"` gets wrong: grep exits at that first
@@ -327,6 +355,16 @@ echo "mullvad_pair_ok (where the pin sits in the list must not matter):"
 # country on a run where nothing changed.
 mullvad_pair_ok "$J" "$S" nl "" bg-sof-wg-001 nl-ams-wg-001 \
   || note "a legal pin whose entry is the first candidate in the list must still be reused"
+
+echo "the pin's mode:"
+# No key material in it, but it names the country the operator chose. Written
+# create-chmod-write like mullvad_render_to, and checked under a deliberately
+# loose umask so a missing chmod cannot pass by accident of the ambient one.
+PIN_MODE="${tmp}/chosen-umask"
+rm -f "$PIN_MODE"
+( umask 022; mullvad_resolve_pair "$J" "$S" bg "" "$PIN_MODE" >/dev/null )
+[[ "$(stat -f '%Lp' "$PIN_MODE")" == "600" ]] \
+  || note "the pin must be mode 600 regardless of umask (got '$(stat -f '%Lp' "$PIN_MODE")')"
 
 echo "mullvad_cache_fresh:"
 # A relay cache is never 0 bytes on a real machine (mullvad_load_relays only

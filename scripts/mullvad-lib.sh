@@ -359,8 +359,14 @@ mullvad_resolve_pair() {
 
   mullvad_assert_multihop "$json" "$entry" "$exit_h" || return 1
 
-  printf '%s %s\n' "$entry" "$exit_h" > "$pin"
+  # Created empty and chmodded BEFORE the hostnames are written, the order
+  # mullvad_render_to uses. No key material here, but the pin names the country
+  # the operator chose, which is the one fact this repo exists to protect, and a
+  # file written at the ambient umask is readable by every local user for as
+  # long as the write takes.
+  : > "$pin"
   chmod 600 "$pin" 2>/dev/null || true
+  printf '%s %s\n' "$entry" "$exit_h" > "$pin"
   printf '%s %s\n' "$entry" "$exit_h"
 }
 
