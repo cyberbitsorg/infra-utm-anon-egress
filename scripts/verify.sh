@@ -572,6 +572,15 @@ while read -r short role vm_idx; do
         # empty, truncated or hand-restored pin all land here, and "could not
         # tell" is a failure in this file, never a quiet pass.
         note_fail "MULLVAD_EXIT='${MULLVAD_EXIT}' asked for a specific exit, but no hostname could be read from ${MULLVAD_PIN_FILE}: nothing can confirm ${short} egresses where you chose"
+      elif ! mullvad_spec_matches "$MULLVAD_EXIT" "$pinned_exit"; then
+        # The pin records what was selected, not what .env asks for now, and
+        # nothing here re-resolves: the pin is rewritten by `make up` /
+        # `make configure`, never by this script. So "edit MULLVAD_EXIT, then
+        # run make verify to see where I am" compares the tunnel against the
+        # PREVIOUS choice and would otherwise print ok for a lab that is not in
+        # the country .env names. Same dash-boundary rule the selection used,
+        # from the same function, so the two cannot drift.
+        note_fail "MULLVAD_EXIT='${MULLVAD_EXIT}' but ${MULLVAD_PIN_FILE} pins ${pinned_exit}, and ${short} is on ${exit_host:-an exit whose hostname could not be read}: .env was edited after this lab was built. Run 'make configure' (or 'make up') so the selection catches up before trusting this check"
       elif [[ -z "$exit_host" ]]; then
         note_fail "${short} egresses via Mullvad but the exit hostname could not be read, so it cannot be compared with the pinned exit ${pinned_exit}"
       elif [[ "$exit_host" == "$pinned_exit" ]]; then

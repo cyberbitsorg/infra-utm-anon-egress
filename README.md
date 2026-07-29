@@ -326,7 +326,10 @@ country mid-lab. `make destroy` clears it, so each fresh lab gets a fresh pair.
 Editing `MULLVAD_EXIT` discards the pin on the next run.
 
 **`make verify` checks you got what you chose.** It compares the exit hostname
-`am.i.mullvad.net` reports against the pinned one and fails if they differ.
+`am.i.mullvad.net` reports against the pinned one, and the pinned one against
+`MULLVAD_EXIT`, failing on either mismatch. The second comparison is what makes
+the first mean anything: edit `MULLVAD_EXIT` and run `make verify` before
+`make configure`, and the tunnel still matches the *old* pin perfectly.
 Egressing via *some* Mullvad exit was never the claim worth making.
 
 **A fetch happens over your real IP.** Selecting a server needs Mullvad's public

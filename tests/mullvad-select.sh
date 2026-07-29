@@ -576,5 +576,31 @@ out="$(run_exit_assertion nl-ams-wg-001 "" "__nopin__")"
 [[ "$out" == *"fails=0"* && "$out" == *"does not apply"* ]] \
   || note "a MULLVAD_WG_CONFIG lab with no pin must pass and say the check does not apply (got '${out}')"
 
+# 9. The tunnel matches the PIN exactly, and the pin no longer matches .env.
+# This is what "edit MULLVAD_EXIT, then run make verify to see where I am"
+# produces, and it is the one case where every hostname comparison agrees while
+# the lab is not in the country .env names. Nothing here re-resolves, so the
+# spec has to be checked against the pin explicitly or it is never checked at
+# all.
+out="$(run_exit_assertion bg-sof-wg-001 nl "$GOODPIN")"
+[[ "$out" == *"fails=1"* ]] \
+  || note "a pin that no longer satisfies MULLVAD_EXIT must FAIL even when the tunnel matches it exactly (got '${out}')"
+[[ "$out" == *"MULLVAD_EXIT='nl'"* && "$out" == *"bg-sof-wg-001"* ]] \
+  || note "the stale-pin failure must name the spec asked for AND what is actually pinned/observed (got '${out}')"
+
+# 10. Same rule as the selection, so a prefix on a dash boundary is honoured:
+# 'bg-sof' chose bg-sof-wg-001 and must still verify it.
+out="$(run_exit_assertion bg-sof-wg-001 bg-sof "$GOODPIN")"
+[[ "$out" == *"fails=0"* ]] \
+  || note "a pin that satisfies a city-level MULLVAD_EXIT must still pass (got '${out}')"
+
+# 11. ...and a prefix that is NOT on a dash boundary is a different place:
+# 'bg-sof' never selected bg-sofia-wg-001, so verifying it as if it had is the
+# same wrong-jurisdiction bug the selection rule exists to prevent. A bare
+# startswith matcher passes this; the shared one does not.
+out="$(run_exit_assertion bg-sofia-wg-001 bg-sof $'x bg-sofia-wg-001\n')"
+[[ "$out" == *"fails=1"* ]] \
+  || note "MULLVAD_EXIT='bg-sof' must not accept a pinned bg-sofia-* exit (got '${out}')"
+
 [[ "$fail" -eq 0 ]] && echo "mullvad-select: OK"
 exit "$fail"
