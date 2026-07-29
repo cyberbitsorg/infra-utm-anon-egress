@@ -532,6 +532,37 @@ while read -r short role vm_idx; do
   if grep -q '"mullvad_exit_ip"[[:space:]]*:[[:space:]]*true' <<<"$exit_json"; then
     exit_host="$(sed -n 's/.*"mullvad_exit_ip_hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$exit_json" || true)"
     ok "${short} egresses via a Mullvad exit (${ws_pub_ip}${exit_host:+, ${exit_host}})"
+    # Egressing via SOME Mullvad exit is not the claim the operator cares about:
+    # they chose a country. Without this, a build could exit anywhere in
+    # Mullvad's network and every check would still be green -- intent and
+    # observation would never be compared.
+    #
+    # The path is spelled out rather than taken from $MULLVAD_PIN_FILE: this
+    # script sources lib.sh (hence GEN_DIR) but not mullvad-lib.sh, and pulling
+    # a whole library in for one filename is not worth it.
+    pin_file="${GEN_DIR}/mullvad-exit.chosen"
+    pinned_exit=""
+    if [[ -f "$pin_file" ]]; then
+      # NR==1 matches how mullvad_resolve_pair reads the pin back (`read -r
+      # entry exit_h < "$pin"`): first line, second field.
+      pinned_exit="$(awk 'NR==1{print $2}' "$pin_file" 2>/dev/null || true)"
+      # A pin that exists but yields no hostname is "could not tell", and this
+      # file's rule is that ambiguity is a failure: a truncated or hand-edited
+      # pin must not quietly switch the comparison below off.
+      [[ -n "$pinned_exit" ]] \
+        || note_fail "${pin_file} exists but no exit hostname could be read from it, so the observed exit cannot be compared with the one that was selected"
+    fi
+    # No pin at all is not a failure: it is the MULLVAD_WG_CONFIG path, where
+    # the operator assembled the config themselves and nothing was selected.
+    if [[ -n "$pinned_exit" ]]; then
+      if [[ -z "$exit_host" ]]; then
+        note_fail "${short} egresses via Mullvad but the exit hostname could not be read, so it cannot be compared with the pinned exit ${pinned_exit}"
+      elif [[ "$exit_host" == "$pinned_exit" ]]; then
+        ok "${short} egresses via the exit that was selected (${pinned_exit})"
+      else
+        note_fail "${short} egresses via ${exit_host} but ${pinned_exit} was selected: the tunnel is not in the country you chose"
+      fi
+    fi
   else
     note_fail "${short} is NOT exiting via Mullvad. Response: ${exit_json:-<none>}"
   fi

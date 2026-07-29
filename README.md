@@ -285,6 +285,47 @@ stripped (unbound owns DNS), IPv6 addresses are removed, and any `PostUp` /
 `PreDown` hooks are dropped (nftables owns egress). It is installed **on the
 gateway only**, mode `0600`, and never touches the workstation.
 
+### Choosing the exit country
+
+Set the exit in `.env` by name, at whatever precision you want:
+
+```bash
+MULLVAD_EXIT="bg"        # any Bulgarian server you have a config for
+MULLVAD_ENTRY=""         # empty: any active server in another country
+```
+
+One config per server must sit in `secrets/` as `<hostname>.conf`. Mullvad's
+config generator will hand you every server at once; drop them in.
+
+**The build assembles multihop for you.** A Mullvad multihop config is the exit
+server's own config with one line changed — `Endpoint = <entry ip>:<exit
+multihop port>` — and that is exactly what preflight writes, to a `0600` temp
+file that never persists. The entry sees your real IP but not your destination;
+the exit sees your destination but not your IP.
+
+**Single-hop is refused, not discouraged.** The build fails before any VM exists
+if entry and exit are the same server, share a country, or resolve to port
+51820. Every config Mullvad's generator emits is single-hop, so this is the
+difference between what you downloaded and what you asked for.
+
+**Your choice is pinned.** `generated/mullvad-exit.chosen` holds the two
+hostnames (never keys), so `make configure` cannot move your tunnel to another
+country mid-lab. `make destroy` clears it, so each fresh lab gets a fresh pair.
+Editing `MULLVAD_EXIT` discards the pin on the next run.
+
+**`make verify` checks you got what you chose.** It compares the exit hostname
+`am.i.mullvad.net` reports against the pinned one and fails if they differ.
+Egressing via *some* Mullvad exit was never the claim worth making.
+
+**One fetch happens over your real IP.** Selecting a server needs Mullvad's
+public relay list (`https://api.mullvad.net/www/relays/wireguard/`), which is
+fetched from your Mac before the lab exists — there is no tunnel to use yet. It
+is cached in `generated/` for 7 days. If you would rather not make that request
+at all, use `MULLVAD_WG_CONFIG` with a config you assembled yourself.
+
+`MULLVAD_EXIT` and `MULLVAD_WG_CONFIG` are mutually exclusive; setting both is
+refused rather than resolved by precedence.
+
 ### When the tunnel is down, nothing moves
 
 This is a feature and it will surprise you at least once. With `wg0` down the

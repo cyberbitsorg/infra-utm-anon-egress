@@ -4,6 +4,7 @@
 # Flags: --provision-only (no Ansible), --configure-only (Ansible only)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/wg-lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/mullvad-lib.sh"
 SCRIPTS="$(dirname "${BASH_SOURCE[0]}")"
 
 require_macos
@@ -59,10 +60,38 @@ run_ansible() {
   # reads that path directly -- it consumes the sanitised copy below, staged
   # under a DIFFERENT key (mullvad_wg_sanitized) so the two never collide as
   # duplicate YAML keys in the same vars file.
-  local wg_src wg_tmp=""
-  if [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
+  #
+  # Two sources for the same thing. MULLVAD_EXIT assembles a multihop config
+  # from the pinned pair; MULLVAD_WG_CONFIG uses the operator's own file.
+  # preflight.sh already rejected the case where both are set -- but
+  # `make configure` skips preflight, so the guard is repeated rather than
+  # assumed.
+  local wg_src wg_tmp="" wg_built="" pair entry_host exit_host
+  if [[ -n "${MULLVAD_WG_CONFIG:-}" && -n "${MULLVAD_EXIT:-}" ]]; then
+    die "Both MULLVAD_WG_CONFIG and MULLVAD_EXIT are set in .env; they are mutually exclusive."
+  fi
+  if [[ -n "${MULLVAD_EXIT:-}" ]]; then
+    mullvad_load_relays "$MULLVAD_RELAY_CACHE" "$MULLVAD_CACHE_MAX_AGE_DAYS"
+    pair="$(mullvad_resolve_pair "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \
+              "$MULLVAD_EXIT" "${MULLVAD_ENTRY:-}" "$MULLVAD_PIN_FILE")" \
+      || die "Could not resolve an exit (reason above)."
+    entry_host="${pair%% *}"; exit_host="${pair##* }"
+    mullvad_assert_multihop "$MULLVAD_RELAY_CACHE" "$entry_host" "$exit_host" \
+      || die "The resolved pair is not multihop (reason above)."
+    wg_built="$(mktemp)"
+    # Registered the moment the file exists, for the same reason as wg_tmp
+    # below: it is about to hold the exit server's private key.
+    trap "rm -f '${vars_file}' '${wg_built}'" EXIT
+    mullvad_render_to "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \
+        "$entry_host" "$exit_host" "$wg_built" \
+      || die "Could not assemble the multihop config (reason above)."
+    wg_src="$wg_built"
+    log "Multihop: exit ${exit_host} via entry ${entry_host}"
+  elif [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
     wg_src="${MULLVAD_WG_CONFIG}"
     [[ "$wg_src" = /* ]] || wg_src="${REPO_ROOT}/${wg_src}"
+  fi
+  if [[ -n "${wg_src:-}" ]]; then
     validate_wg_config "$wg_src" || die "The WireGuard config is not usable (reason above)."
     wg_tmp="$(mktemp)"
     chmod 600 "$wg_tmp"
@@ -70,7 +99,7 @@ run_ansible() {
     # it: a failure between creation and this point (a write error, a signal)
     # would otherwise exit under `set -e` with only the vars_file half of the
     # cleanup registered, leaving a file containing the private key behind.
-    trap "rm -f '${vars_file}' '${wg_tmp}'" EXIT
+    trap "rm -f '${vars_file}' '${wg_tmp}' '${wg_built}'" EXIT
     sanitize_wg_config "$wg_src" > "$wg_tmp"
     vars_content="${vars_content}
 mullvad_wg_sanitized: '${wg_tmp}'
