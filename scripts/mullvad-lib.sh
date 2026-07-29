@@ -217,3 +217,72 @@ mullvad_resolve_pair() {
   chmod 600 "$pin" 2>/dev/null || true
   printf '%s %s\n' "$entry" "$exit_h"
 }
+
+MULLVAD_RELAY_CACHE="${GEN_DIR}/mullvad-relays.json"
+MULLVAD_PIN_FILE="${GEN_DIR}/mullvad-exit.chosen"
+MULLVAD_CACHE_MAX_AGE_DAYS=7
+
+# True if <cache> exists and is younger than <days>. `find -mtime +N` counts
+# whole 24-hour periods, which is exactly the granularity wanted here.
+mullvad_cache_fresh() {
+  local cache="${1:?}" days="${2:?}"
+  # -e, not -s: this is an mtime freshness check, not a content check. A cache
+  # only ever reaches disk via mullvad_load_relays' own mv below, which already
+  # requires the JSON to parse as a non-empty list -- an empty file cannot occur
+  # there. Using -s here would make a just-created (0-byte) cache read as
+  # "not fresh", which is only reachable in a test fixture, but wrong all the same.
+  [[ -e "$cache" ]] || return 1
+  [[ -z "$(find "$cache" -mtime +"$days" -print 2>/dev/null)" ]]
+}
+
+# Make sure the relay cache is present and parseable.
+#
+# The fetch happens on the HOST, over the operator's real connection, before the
+# lab exists -- there is no tunnel to use yet. It is a public unauthenticated
+# endpoint every Mullvad user queries, and the 7-day cache keeps it rare, but it
+# is real-IP traffic and the README says so.
+#
+# A stale cache is used with a visible warning; NO cache and no network is fatal.
+# Guessing a multihop port would produce a tunnel that silently exits somewhere
+# the operator did not choose, which is worse than not building.
+mullvad_load_relays() {
+  local cache="${1:-$MULLVAD_RELAY_CACHE}" days="${2:-$MULLVAD_CACHE_MAX_AGE_DAYS}" tmpf
+  if mullvad_cache_fresh "$cache" "$days"; then
+    log "Using cached Mullvad relay list ($(basename "$cache"))"
+    return 0
+  fi
+  mkdir -p "$(dirname "$cache")"
+  tmpf="$(mktemp)"
+  log "Fetching the Mullvad relay list (public API, over your real IP)"
+  if curl -fsS --max-time 30 "$MULLVAD_RELAY_URL" -o "$tmpf" 2>/dev/null \
+     && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d,list) and d else 1)' "$tmpf"; then
+    mv "$tmpf" "$cache"
+    ok "Relay list cached ($(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$cache") relays)"
+    return 0
+  fi
+  rm -f "$tmpf"
+  [[ -s "$cache" ]] \
+    || die "Could not fetch ${MULLVAD_RELAY_URL} and no cached relay list exists at ${cache}. The exit's multihop port comes from that list and must not be guessed."
+  warn "Could not refresh the relay list; using the cached copy from $(date -r "$cache" '+%Y-%m-%d %H:%M')."
+}
+
+# Write the derived multihop config to <dest> at mode 0600.
+#
+# Created empty and chmodded BEFORE any content is written: the file holds the
+# exit server's private key, and a window where it exists at the default umask
+# is a window where another local user can read it.
+mullvad_render_to() {
+  local json="${1:?}" secrets_dir="${2:?}" entry="${3:?}" exit_h="${4:?}" dest="${5:?}"
+  local entry_ip exit_port src
+  src="${secrets_dir}/${exit_h}.conf"
+  [[ -r "$src" ]] || { echo "no config for exit ${exit_h} at ${src}" >&2; return 1; }
+  entry_ip="$(mullvad_relay_field "$json" "$entry" ipv4_addr_in)"
+  [[ "$entry_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "entry ${entry} has no IPv4 address in the relay list (got '${entry_ip}'). The endpoint must be an IP: resolving a name would need clear-net DNS before the tunnel exists." >&2; return 1; }
+  exit_port="$(mullvad_endpoint_port_for "$json" "$exit_h")"
+  [[ "$exit_port" =~ ^[0-9]+$ ]] \
+    || { echo "exit ${exit_h} has no numeric multihop_port." >&2; return 1; }
+  : > "$dest"
+  chmod 600 "$dest"
+  mullvad_rewrite_endpoint "$src" "$entry_ip" "$exit_port" > "$dest"
+}

@@ -215,5 +215,22 @@ mullvad_resolve_pair "$J" "$S" zz "" "$PIN" >/dev/null 2>&1 \
 mullvad_resolve_pair "$J" "$S" bg bg "$PIN" >/dev/null 2>&1 \
   && note "an entry spec confined to the exit's own country must fail"
 
+echo "mullvad_cache_fresh:"
+touch "${tmp}/fresh.json"
+mullvad_cache_fresh "${tmp}/fresh.json" 7 || note "a just-touched cache must be fresh"
+mullvad_cache_fresh "${tmp}/missing.json" 7 && note "a missing cache must not be fresh"
+# 8 days old against a 7-day limit.
+touch -t "$(date -v-8d +%Y%m%d%H%M 2>/dev/null || date -d '8 days ago' +%Y%m%d%H%M)" "${tmp}/old.json"
+mullvad_cache_fresh "${tmp}/old.json" 7 && note "an 8-day-old cache must not be fresh against a 7-day limit"
+
+echo "mullvad_render_to:"
+mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived.conf"
+[[ "$(grep -c '^Endpoint = 185.213.154.70:3225$' "${tmp}/derived.conf")" -eq 1 ]] \
+  || note "the derived config must point at the entry ip and the exit multihop port"
+[[ "$(stat -f '%Lp' "${tmp}/derived.conf")" == "600" ]] \
+  || note "the derived config holds a private key and must be mode 600"
+diff <(grep -v '^Endpoint' "${S}/bg-sof-wg-001.conf") <(grep -v '^Endpoint' "${tmp}/derived.conf") >/dev/null \
+  || note "the derived config must differ from the exit's config only in Endpoint"
+
 [[ "$fail" -eq 0 ]] && echo "mullvad-select: OK"
 exit "$fail"
