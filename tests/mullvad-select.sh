@@ -63,6 +63,30 @@ got="$(mullvad_relay_match "$J" "" | grep -c . || true)"
 [[ "$got" == "7" ]] \
   || note "an empty spec must match every active relay, not none (got '${got}')"
 
+echo "mullvad_spec_matches:"
+# The rule itself, as a predicate. verify.sh checks the pinned exit against
+# MULLVAD_EXIT with this same function, so the cases below are the ones that
+# decide both which country gets selected and which country counts as verified.
+mullvad_spec_matches se se-sto-wg-001 || note "'se' must match se-sto-wg-001"
+mullvad_spec_matches se se2-sto-wg-001 && note "'se' must NOT match se2-sto-wg-001"
+mullvad_spec_matches bg-sof bg-sofia-wg-001 && note "'bg-sof' must NOT match bg-sofia-wg-001"
+mullvad_spec_matches bg-sof-wg-001 bg-sof-wg-001 || note "an exact hostname must match itself"
+mullvad_spec_matches "" nl-ams-wg-001 || note "an empty spec means anywhere"
+mullvad_spec_matches nl bg-sof-wg-001 && note "'nl' must not match another country"
+
+# And it must be the SAME rule mullvad_relay_match applies -- one implementation
+# is the whole point, so this compares the two on every spec/hostname pair the
+# fixture offers. A second matcher that drifted (say, a bare startswith in one
+# of them) shows up here rather than as a lab in the wrong country.
+for h in bg-sof-wg-001 bg-sof-wg-002 bg-sofia-wg-001 se-got-wg-001 se-sto-wg-001 se2-sto-wg-001 nl-ams-wg-001; do
+  for spec in "" se bg bg-sof nl zz; do
+    if mullvad_spec_matches "$spec" "$h"; then want=1; else want=0; fi
+    if mullvad_relay_match "$J" "$spec" | grep -qxF "$h"; then got=1; else got=0; fi
+    [[ "$want" == "$got" ]] \
+      || note "mullvad_relay_match and mullvad_spec_matches disagree on spec '${spec}' vs ${h} (match=${got}, predicate=${want})"
+  done
+done
+
 echo "mullvad_relay_field:"
 [[ "$(mullvad_relay_field "$J" bg-sof-wg-001 multihop_port)" == "3225" ]] \
   || note "multihop_port lookup"
@@ -72,6 +96,57 @@ echo "mullvad_relay_field:"
   || note "country_code lookup"
 [[ -z "$(mullvad_relay_field "$J" does-not-exist country_code)" ]] \
   || note "an unknown hostname must yield nothing"
+
+echo "relay table cache:"
+# mullvad_relay_match / mullvad_relay_field answer from a table derived from the
+# JSON once, instead of parsing it per call. A cache that can answer for a file
+# it was not built from is worse than the 26 s it saves: mullvad_load_relays
+# replaces the relay list mid-run whenever a refetch succeeds, and the answers
+# after that must be about the new file. (The stamp is size + mtime, so the two
+# writes below differ in size as well as content -- a same-size rewrite inside
+# one mtime tick is the case this does not cover.)
+cp "$J" "${tmp}/mutable.json"
+[[ "$(mullvad_relay_field "${tmp}/mutable.json" bg-sof-wg-001 country_code)" == "bg" ]] \
+  || note "the first lookup against a relay list must be correct"
+cat > "${tmp}/mutable.json" <<'EOF'
+[{"hostname":"bg-sof-wg-001","active":true,"ipv4_addr_in":"146.70.188.130","multihop_port":3225,"country_code":"xx","city_code":"sof"}]
+EOF
+[[ "$(mullvad_relay_field "${tmp}/mutable.json" bg-sof-wg-001 country_code)" == "xx" ]] \
+  || note "a replaced relay list must rebuild the derived table, not keep answering for the file it replaced"
+got="$(mullvad_relay_match "${tmp}/mutable.json" "" | tr '\n' ' ')"
+[[ "$got" == "bg-sof-wg-001 " ]] \
+  || note "a replaced relay list must rebuild the hostname table too (got '${got}')"
+
+# A duplicated hostname answers from the FIRST record, which is what the
+# per-relay scan this table replaced did (it stopped at the first match). Not a
+# shape Mullvad publishes, but "which of the two do I get" must be decided by
+# the code rather than by which one the table happened to keep.
+cat > "${tmp}/dupe.json" <<'EOF'
+[
+ {"hostname":"bg-sof-wg-001","active":true,"ipv4_addr_in":"146.70.188.130","multihop_port":3225,"country_code":"bg","city_code":"sof"},
+ {"hostname":"bg-sof-wg-001","active":true,"ipv4_addr_in":"10.9.9.9","multihop_port":3999,"country_code":"xx","city_code":"sof"}
+]
+EOF
+got="$(mullvad_relay_field "${tmp}/dupe.json" bg-sof-wg-001 country_code)"
+[[ "$got" == "bg" ]] \
+  || note "a duplicated hostname must answer from the first record, as the scan this replaced did (got '${got}')"
+got="$(mullvad_relay_field "${tmp}/dupe.json" bg-sof-wg-001 multihop_port)"
+[[ "$got" == "3225" ]] \
+  || note "every field of a duplicated hostname must come from that same first record (got '${got}')"
+
+echo "_mullvad_list_has:"
+# The candidate list is matched as literal strings. A corrupted pin read as a
+# basic regular expression could otherwise claim to be a candidate it does not
+# name.
+_mullvad_list_has "$(printf 'bg-sof-wg-001\nbg-sof-wg-002\n')" 'bg-sof-wg-00.' \
+  && note "a pin must be compared literally, never as a pattern"
+_mullvad_list_has "$(printf 'bg-sof-wg-001\nbg-sof-wg-002\n')" '.*' \
+  && note "a pin of '.*' must match nothing"
+_mullvad_list_has "$(printf 'bg-sof-wg-001\nbg-sof-wg-002\n')" bg-sof-wg-002 \
+  || note "an exact hostname must be found"
+_mullvad_list_has "$(printf 'bg-sof-wg-001\nbg-sof-wg-002\n')" bg-sof-wg-001 \
+  || note "the FIRST line must be found too"
+_mullvad_list_has "" bg-sof-wg-001 && note "an empty list contains nothing"
 
 echo "mullvad_pick_random:"
 got="$(printf 'a\nb\nc\n' | mullvad_pick_random)"
@@ -243,6 +318,15 @@ mullvad_resolve_pair "$J" "$S" zz "" "$PIN" >/dev/null 2>&1 \
   && note "an exit spec matching nothing must fail"
 mullvad_resolve_pair "$J" "$S" bg bg "$PIN" >/dev/null 2>&1 \
   && note "an entry spec confined to the exit's own country must fail"
+
+echo "mullvad_pair_ok (where the pin sits in the list must not matter):"
+# bg-sof-wg-001 is the FIRST of the seven sorted entry candidates, which is the
+# case a `candidates | grep -q "$entry"` gets wrong: grep exits at that first
+# line, the producer takes SIGPIPE writing the second, and pipefail turns a
+# perfectly legal pin into "re-resolve". The symptom is a tunnel that moves
+# country on a run where nothing changed.
+mullvad_pair_ok "$J" "$S" nl "" bg-sof-wg-001 nl-ams-wg-001 \
+  || note "a legal pin whose entry is the first candidate in the list must still be reused"
 
 echo "mullvad_cache_fresh:"
 # A relay cache is never 0 bytes on a real machine (mullvad_load_relays only

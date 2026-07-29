@@ -20,57 +20,159 @@
 MULLVAD_RELAY_URL="https://api.mullvad.net/www/relays/wireguard/"
 MULLVAD_SINGLEHOP_PORT="51820"
 
-# Print every ACTIVE hostname matching <spec>, one per line, sorted.
+# Does <hostname> belong to <spec>?
 #
 # Matching is prefix-on-a-dash-boundary, never a bare substring: "se" must not
 # match "se2-sto-wg-001" (a different country's numbering) and "bg-sof" must not
 # match "bg-sofia-wg-001". A plain `startswith(spec)` gets both wrong and would
 # put the operator in a country they did not choose.
 #
-# An EMPTY spec means "every active relay", which is what an unset MULLVAD_ENTRY
-# asks for. Note this is a real special case, not a fallthrough: the dash-boundary
+# An EMPTY spec means "every relay", which is what an unset MULLVAD_ENTRY asks
+# for. Note this is a real special case, not a fallthrough: the dash-boundary
 # rule applied to "" would test `startswith("-")` and match nothing at all, so an
 # operator who left MULLVAD_ENTRY blank would get "no entry server matches ''"
 # instead of a free choice.
-mullvad_relay_match() {
-  local json="${1:?relay json required}" spec="${2-}"
-  python3 - "$json" "$spec" <<'PY'
+#
+# THE definition of the rule, deliberately in one place. mullvad_relay_match
+# filters the relay list with it and verify.sh checks the pinned exit against
+# .env with it: selection and verification asking the same question two
+# different ways is how a lab ends up green in a country nobody chose.
+mullvad_spec_matches() {
+  local spec="${1-}" host="${2-}"
+  [[ -n "$spec" ]] || return 0
+  case "$host" in
+    "$spec"|"$spec"-*) return 0 ;;
+  esac
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# The derived lookup table.
+#
+# mullvad_relay_match and mullvad_relay_field used to parse the relay JSON in a
+# fresh python3 each time they were called. The entry pre-filter asks for one
+# country_code per candidate, so with MULLVAD_ENTRY empty a single resolution
+# against the live 539-relay list cost 540 interpreter spawns and ~26 s inside
+# `make up`. The JSON is therefore parsed ONCE into a flat table that awk and
+# the shell can read directly.
+#
+# The table is a cache and must never be able to answer for a relay list it was
+# not built from: its first line stamps the size and mtime (sub-second where
+# stat provides it) of the JSON, and any difference rebuilds. That covers the
+# case that actually happens -- mullvad_load_relays mv'ing a refetched list over
+# the cache mid-run -- without hashing 500 KB on every lookup.
+#
+# It is written next to the JSON (`<json>.tbl`), which needs no fallback: the
+# only relay list this repo reads is the one mullvad_load_relays put there, so a
+# directory it cannot write is a build that already died. `make destroy` removes
+# GEN_DIR wholesale, table included, and `generated/` is gitignored.
+#
+# Format, one record per line, tab-separated:
+#   H<TAB><hostname>                     every ACTIVE relay, sorted
+#   F<TAB><hostname><TAB><key><TAB><value>   fields of the FIRST relay with
+#                                            that hostname
+# "First" matches the `break` the per-call parse did, so a duplicated hostname
+# still answers from the same record it always did. A value containing a newline
+# is omitted rather than written, because it would forge a record; that reads
+# back as "unknown", which every caller already treats as fatal.
+# ---------------------------------------------------------------------------
+
+_mullvad_stamp() {
+  stat -f '%z %Fm' "${1:?}" 2>/dev/null || stat -c '%s %.9Y' "${1:?}" 2>/dev/null
+}
+
+_mullvad_build_table() {
+  python3 - "${1:?}" "${2:?}" "${3:?}" <<'PY'
 import json, sys
-path, spec = sys.argv[1], sys.argv[2]
-with open(path) as fh:
+src, dest, stamp = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src) as fh:
     relays = json.load(fh)
-out = [r["hostname"] for r in relays
-       if r.get("active")
-       and isinstance(r.get("hostname"), str)
-       and (spec == ""
-            or r["hostname"] == spec
-            or r["hostname"].startswith(spec + "-"))]
-# Guard against printing a bare blank line when nothing matches: print("")
-# still emits a trailing newline, and a caller piping through `tr '\n' ' '`
-# (as the test harness does) would see a single space instead of empty
-# output, breaking the "-z" check for "no match".
-if out:
-    print("\n".join(sorted(out)))
+hosts, seen, fields = [], set(), []
+for r in relays:
+    h = r.get("hostname")
+    if not isinstance(h, str):
+        continue
+    if r.get("active"):
+        hosts.append(h)
+    if h in seen:
+        continue
+    seen.add(h)
+    for k, v in r.items():
+        if v is None:
+            continue
+        s = str(v)
+        if "\n" in s or "\n" in k or "\t" in k:
+            continue
+        fields.append("F\t%s\t%s\t%s\n" % (h, k, s))
+with open(dest, "w") as fh:
+    fh.write(stamp + "\n")
+    for h in sorted(hosts):
+        fh.write("H\t%s\n" % h)
+    fh.writelines(fields)
 PY
+}
+
+# Print the path of an up-to-date table for <json>, building it if needed.
+# Returns 1 (having printed nothing) when the JSON cannot be parsed, exactly as
+# the per-call parse did, so callers keep seeing empty output for a list they
+# cannot trust.
+_mullvad_table() {
+  local json="${1:?relay json required}" tbl stamp hdr tmp
+  tbl="${json}.tbl"
+  stamp="# $(_mullvad_stamp "$json" || true)"
+  if [[ -s "$tbl" ]]; then
+    hdr=""
+    IFS= read -r hdr < "$tbl" || true
+    if [[ "$hdr" == "$stamp" ]]; then
+      printf '%s\n' "$tbl"
+      return 0
+    fi
+  fi
+  tmp="${tbl}.$$.${RANDOM}"
+  if _mullvad_build_table "$json" "$tmp" "$stamp" && mv -f "$tmp" "$tbl"; then
+    printf '%s\n' "$tbl"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Print every ACTIVE hostname matching <spec>, one per line, sorted.
+#
+# Nothing is printed when nothing matches -- not a blank line. A caller piping
+# through `tr '\n' ' '` (as the test harness does) would see a single space
+# instead of empty output and its "-z" check for "no match" would stop working.
+#
+# The matches are collected and written ONCE, as the python this replaced did.
+# A line-at-a-time loop would take SIGPIPE from any consumer that stops early
+# (`grep -q`, `head`) and, under `set -o pipefail`, hand that failure to the
+# caller as "no match".
+mullvad_relay_match() {
+  local json="${1:?relay json required}" spec="${2-}" tbl h out=""
+  tbl="$(_mullvad_table "$json")" || return 1
+  while IFS= read -r h; do
+    mullvad_spec_matches "$spec" "$h" && out="${out}${h}
+"
+  done < <(awk 'substr($0,1,2)=="H\t"{print substr($0,3)}' "$tbl")
+  [[ -z "$out" ]] || printf '%s' "$out"
+  return 0
 }
 
 # Print one field of one relay, or nothing if the relay or field is absent.
 # Callers MUST treat empty as "unknown" and fail; a missing multihop_port that
 # defaulted to something would be a silently wrong tunnel.
+#
+# The lookup is prefix-anchored on the whole record rather than split into awk
+# fields, so a value that itself contains a tab comes back whole.
+# host/field arrive through the environment, not `-v`, which would run backslash
+# escape processing over them.
 mullvad_relay_field() {
-  local json="${1:?relay json required}" host="${2:?hostname required}" field="${3:?field required}"
-  python3 - "$json" "$host" "$field" <<'PY'
-import json, sys
-path, host, field = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as fh:
-    relays = json.load(fh)
-for r in relays:
-    if r.get("hostname") == host:
-        v = r.get(field)
-        if v is not None:
-            print(v)
-        break
-PY
+  local json="${1:?relay json required}" host="${2:?hostname required}" field="${3:?field required}" tbl
+  tbl="$(_mullvad_table "$json")" || return 1
+  _MV_HOST="$host" _MV_FIELD="$field" awk '
+    BEGIN { pfx = "F\t" ENVIRON["_MV_HOST"] "\t" ENVIRON["_MV_FIELD"] "\t"; n = length(pfx) }
+    substr($0, 1, n) == pfx { print substr($0, n + 1); exit }
+  ' "$tbl"
 }
 
 # Read lines on stdin, print exactly one at random. Returns 1 on empty input so
@@ -182,14 +284,38 @@ mullvad_entries_outside_country() {
   return 0
 }
 
+# Is <needle> one of the newline-separated lines of <haystack>? Exact string
+# equality, because a pin is data and never a pattern: `grep -qx` would read a
+# corrupted pin as a basic regular expression and could match a candidate it
+# does not name.
+#
+# Deliberately NOT `producer | grep -qxF "$needle"`, which is the obvious
+# spelling and is wrong here for a second reason: `grep -q` exits at the FIRST
+# match, the producer takes SIGPIPE on its next write, and under
+# `set -o pipefail` that becomes the pipeline's status -- so whether a
+# still-legal pin was reused came down to where in the candidate list it
+# happened to sort and whether grep had drained the pipe first. Nothing
+# streams, nothing exits early, nothing depends on timing.
+_mullvad_list_has() {
+  local haystack="${1-}" needle="${2-}" line
+  while IFS= read -r line; do
+    [[ "$line" == "$needle" ]] && return 0
+  done <<MULLVAD_LIST
+${haystack}
+MULLVAD_LIST
+  return 1
+}
 
 # Is this exact pair still legal under the current .env? Silent by design: it is
 # a predicate used to decide whether to keep a pin, not a validator whose reasons
 # the operator needs to read.
 mullvad_pair_ok() {
   local json="${1:?}" secrets_dir="${2:?}" exit_spec="${3:?}" entry_spec="${4:-}" entry="${5:?}" exit_h="${6:?}"
-  mullvad_exit_candidates "$json" "$secrets_dir" "$exit_spec" | grep -qx "$exit_h" || return 1
-  mullvad_entry_candidates "$json" "$entry_spec" | grep -qx "$entry" || return 1
+  local exits entries
+  exits="$(mullvad_exit_candidates "$json" "$secrets_dir" "$exit_spec")" || return 1
+  _mullvad_list_has "$exits" "$exit_h" || return 1
+  entries="$(mullvad_entry_candidates "$json" "$entry_spec")" || return 1
+  _mullvad_list_has "$entries" "$entry" || return 1
   mullvad_assert_multihop "$json" "$entry" "$exit_h" >/dev/null 2>&1 || return 1
   return 0
 }
