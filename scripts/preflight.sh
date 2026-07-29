@@ -2,6 +2,7 @@
 # Verify the host can build the lab and generate an SSH key if needed.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/wg-lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/mullvad-lib.sh"
 
 require_macos
 load_config
@@ -79,12 +80,41 @@ fi
 # seconds; finding out after the ruleset is installed costs a debugging session
 # with no egress.
 load_env
-if [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
+
+# Exactly one of the two mechanisms. A precedence rule would be worse than an
+# error: the entire point of this feature is knowing which exit you are on.
+if [[ -n "${MULLVAD_WG_CONFIG:-}" && -n "${MULLVAD_EXIT:-}" ]]; then
+  die "Both MULLVAD_WG_CONFIG and MULLVAD_EXIT are set in .env. They are mutually exclusive: clear one. MULLVAD_EXIT assembles a multihop config for you; MULLVAD_WG_CONFIG uses a file you assembled yourself."
+fi
+
+if [[ -n "${MULLVAD_EXIT:-}" ]]; then
+  mullvad_load_relays "$MULLVAD_RELAY_CACHE" "$MULLVAD_CACHE_MAX_AGE_DAYS"
+  log "Resolving exit '${MULLVAD_EXIT}'${MULLVAD_ENTRY:+ via entry '${MULLVAD_ENTRY}'}"
+  pair="$(mullvad_resolve_pair "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \
+            "$MULLVAD_EXIT" "${MULLVAD_ENTRY:-}" "$MULLVAD_PIN_FILE")" \
+    || die "Could not resolve an exit (reason above). Fix .env or secrets/ before 'make up'."
+  entry_host="${pair%% *}"; exit_host="${pair##* }"
+  # NOT re-asserted here: every return path out of mullvad_resolve_pair --
+  # fresh pick or reused pin -- already runs through mullvad_assert_multihop
+  # itself (mullvad_pair_ok calls it for a reused pin; the fresh-pick path
+  # calls it directly before writing the pin). A second call here can never
+  # fire its die and only costs three more python3 spawns per preflight.
+  wg_derived="$(mktemp)"
+  trap 'rm -f "${wg_derived:-}"' EXIT
+  mullvad_render_to "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \
+      "$entry_host" "$exit_host" "$wg_derived" \
+    || die "Could not assemble the multihop config (reason above)."
+  validate_wg_config "$wg_derived" \
+    || die "The assembled config is not usable (reason above)."
+  ok "Exit ${exit_host} ($(mullvad_relay_field "$MULLVAD_RELAY_CACHE" "$exit_host" country_code)) via entry ${entry_host} ($(mullvad_relay_field "$MULLVAD_RELAY_CACHE" "$entry_host" country_code)), endpoint $(wg_endpoint_ip "$wg_derived"):$(wg_endpoint_port "$wg_derived")"
+elif [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
   wg_cfg="${MULLVAD_WG_CONFIG}"
   [[ "$wg_cfg" = /* ]] || wg_cfg="${REPO_ROOT}/${wg_cfg}"
   log "Checking WireGuard config: ${wg_cfg}"
   if validate_wg_config "$wg_cfg"; then
     ok "WireGuard config is usable (endpoint $(wg_endpoint_ip "$wg_cfg"):$(wg_endpoint_port "$wg_cfg"))"
+    [[ "$(wg_endpoint_port "$wg_cfg")" != "$MULLVAD_SINGLEHOP_PORT" ]] \
+      || warn "${wg_cfg} uses port ${MULLVAD_SINGLEHOP_PORT}: this is a SINGLE-hop config. Use MULLVAD_EXIT to get multihop assembled for you."
     cfg_perms="$(stat -f '%Lp' "$wg_cfg" 2>/dev/null || echo '')"
     case "$cfg_perms" in
       600|400) ;;
@@ -94,7 +124,7 @@ if [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
     die "The WireGuard config is not usable (reason above). Fix it before 'make up'."
   fi
 else
-  warn "MULLVAD_WG_CONFIG is not set in .env: the gateway will have no tunnel and the workstation no egress."
+  warn "Neither MULLVAD_EXIT nor MULLVAD_WG_CONFIG is set in .env: the gateway will have no tunnel and the workstation no egress."
 fi
 
 # The internal segment rides an Apple vmnet host-only switch whose OWN subnet is

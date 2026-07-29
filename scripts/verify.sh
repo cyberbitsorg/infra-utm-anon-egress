@@ -33,7 +33,22 @@
 # Python). The workstation deliberately has no curl and no dig. The gateway needs
 # tcpdump, which the gateway role installs for exactly this reason.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# Sourced for MULLVAD_PIN_FILE, so the pin's location is defined in exactly one
+# place. Spelling the path out a second time here would mean a rename in
+# mullvad-lib.sh silently switches the exit-country assertion below off: the
+# `[[ -f ]]` goes false, nothing prints, and this suite stays green on a tunnel
+# exiting anywhere in Mullvad's network. The file is pure functions and
+# constants -- sourcing it runs nothing.
+source "$(dirname "${BASH_SOURCE[0]}")/mullvad-lib.sh"
 load_config
+# .env is read for ONE fact: which mechanism built this lab. Without it this
+# script cannot tell a MULLVAD_EXIT build (where the pin is authoritative) from
+# a MULLVAD_WG_CONFIG build (where a leftover pin is meaningless), and would
+# either skip the country check in silence or fail a correct lab for exiting
+# somewhere the operator never asked for. load_env is a no-op if .env is absent,
+# and although it exports what it sources, no ssh invocation here sets SendEnv
+# or SetEnv, so nothing from .env can reach a guest.
+load_env
 
 # Resolve the gateway's host port and the internal-only VMs from the fleet, the
 # same way ssh.sh does, so a reordered or renamed fleet does not silently verify
@@ -532,6 +547,55 @@ while read -r short role vm_idx; do
   if grep -q '"mullvad_exit_ip"[[:space:]]*:[[:space:]]*true' <<<"$exit_json"; then
     exit_host="$(sed -n 's/.*"mullvad_exit_ip_hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$exit_json" || true)"
     ok "${short} egresses via a Mullvad exit (${ws_pub_ip}${exit_host:+, ${exit_host}})"
+    # >>> exit-country assertion (extracted verbatim by tests/mullvad-select.sh) >>>
+    # Egressing via SOME Mullvad exit is not the claim the operator cares about:
+    # they chose a country. Without this, a build could exit anywhere in
+    # Mullvad's network and every check would still be green -- intent and
+    # observation would never be compared.
+    #
+    # WHICH MECHANISM BUILT THE LAB decides whether the comparison applies at
+    # all, and only .env says which. The pin outlives an .env edit -- only `make
+    # destroy` clears it -- and the two mechanisms are mutually exclusive, so
+    # switching from MULLVAD_EXIT to MULLVAD_WG_CONFIG is a normal thing to do
+    # and leaves a stale pin behind. Applied blindly, that pin fails a perfectly
+    # correct lab while naming a country the operator never asked for.
+    if [[ -n "${MULLVAD_EXIT:-}" ]]; then
+      pinned_exit=""
+      if [[ -f "$MULLVAD_PIN_FILE" ]]; then
+        # NR==1 matches how mullvad_resolve_pair reads the pin back (`read -r
+        # entry exit_h < "$pin"`): first line, second field.
+        pinned_exit="$(awk 'NR==1{print $2}' "$MULLVAD_PIN_FILE" 2>/dev/null || true)"
+      fi
+      if [[ -z "$pinned_exit" ]]; then
+        # Not a skip. MULLVAD_EXIT names a country the operator asked for, and
+        # with no readable pin nothing here can confirm they got it. A missing,
+        # empty, truncated or hand-restored pin all land here, and "could not
+        # tell" is a failure in this file, never a quiet pass.
+        note_fail "MULLVAD_EXIT='${MULLVAD_EXIT}' asked for a specific exit, but no hostname could be read from ${MULLVAD_PIN_FILE}: nothing can confirm ${short} egresses where you chose"
+      elif ! mullvad_spec_matches "$MULLVAD_EXIT" "$pinned_exit"; then
+        # The pin records what was selected, not what .env asks for now, and
+        # nothing here re-resolves: the pin is rewritten by `make up` /
+        # `make configure`, never by this script. So "edit MULLVAD_EXIT, then
+        # run make verify to see where I am" compares the tunnel against the
+        # PREVIOUS choice and would otherwise print ok for a lab that is not in
+        # the country .env names. Same dash-boundary rule the selection used,
+        # from the same function, so the two cannot drift.
+        note_fail "MULLVAD_EXIT='${MULLVAD_EXIT}' but ${MULLVAD_PIN_FILE} pins ${pinned_exit}, and ${short} is on ${exit_host:-an exit whose hostname could not be read}: .env was edited after this lab was built. Run 'make configure' (or 'make up') so the selection catches up before trusting this check"
+      elif [[ -z "$exit_host" ]]; then
+        note_fail "${short} egresses via Mullvad but the exit hostname could not be read, so it cannot be compared with the pinned exit ${pinned_exit}"
+      elif [[ "$exit_host" == "$pinned_exit" ]]; then
+        ok "${short} egresses via the exit that was selected (${pinned_exit})"
+      else
+        note_fail "${short} egresses via ${exit_host} but ${pinned_exit} was selected: the tunnel is not in the country you chose"
+      fi
+    else
+      # Said out loud rather than skipped in silence. An assertion that does not
+      # apply and an assertion that was switched off produce the same empty
+      # transcript, and this file's whole rule is that those two must never be
+      # indistinguishable.
+      log "Exit-country assertion does not apply to ${short}: this lab is built from MULLVAD_WG_CONFIG, so no country was selected to compare against (any ${MULLVAD_PIN_FILE} left over from an earlier lab is ignored)"
+    fi
+    # <<< exit-country assertion <<<
   else
     note_fail "${short} is NOT exiting via Mullvad. Response: ${exit_json:-<none>}"
   fi
