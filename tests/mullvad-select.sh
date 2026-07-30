@@ -134,6 +134,94 @@ got="$(mullvad_relay_field "${tmp}/dupe.json" bg-sof-wg-001 multihop_port)"
 [[ "$got" == "3225" ]] \
   || note "every field of a duplicated hostname must come from that same first record (got '${got}')"
 
+echo "the derived table's format version:"
+# A table written by an OLDER build of mullvad-lib.sh must be discarded, not
+# read. The size/mtime half of the stamp cannot do that on its own: it only
+# notices a changed relay list, so a table built before (say) the separator
+# filter below existed keeps answering from forged records for as long as the
+# JSON beneath it is untouched -- up to the full 7-day cache life.
+#
+# So the fixture below is a hostile table carrying the CORRECT size/mtime stamp
+# and the wrong format version. That is the only shape that tells the version
+# apart from the rest of the stamp: give it a wrong mtime too and the test passes
+# whether the version exists or not.
+VJ="${tmp}/version.json"
+cp "$J" "$VJ"
+mullvad_relay_field "$VJ" bg-sof-wg-001 country_code >/dev/null
+{ printf '# %s\n' "$(_mullvad_stamp "$VJ")"; printf 'H\tforged-host-001\n'; } > "${VJ}.tbl"
+got="$(mullvad_relay_match "$VJ" forged | tr '\n' ' ')"
+[[ -z "$got" ]] \
+  || note "a derived table stamped with a different format version must be rebuilt, not trusted (got '${got}')"
+got="$(mullvad_relay_match "$VJ" bg-sof | tr '\n' ' ')"
+[[ "$got" == "bg-sof-wg-001 bg-sof-wg-002 " ]] \
+  || note "...and the rebuild must produce the real table (got '${got}')"
+
+echo "the derived table's separators:"
+# The table is line- and tab-separated, so anything that can carry either
+# separator must be dropped before it is written -- otherwise a relay list can
+# forge records this repo has no way to tell from real ones. Both hostnames
+# below were verified to do exactly that before the hostname filter existed:
+# "inj\nH\tza-jnb-wg-999" put za-jnb-wg-999 into the hostname stream as a
+# selectable candidate that is in no relay list, and "vic\tcountry_code" made
+# `mullvad_relay_field <json> vic country_code` answer
+# "hostname<TAB>vic<TAB>country_code". The per-relay scan this table replaced
+# answered nothing for either, and "nothing" is what every caller already
+# treats as fatal.
+#
+# Not a privilege boundary -- whoever can hand this repo a relay list can choose
+# the exit country with ordinary-looking JSON -- but an answer about a server
+# that does not exist is a different class of wrong from a refusal to answer.
+# ok-bbb-wg-001 carries the same attack in a VALUE instead of a hostname, which
+# is the case the writer already filtered; it is here so both filters are pinned
+# by the same fixture.
+python3 - "${tmp}/hostile.json" <<'PY'
+import json, sys
+json.dump([
+    {"hostname": "inj\nH\tza-jnb-wg-999", "active": True, "country_code": "bg",
+     "multihop_port": 3225, "ipv4_addr_in": "10.0.0.1"},
+    {"hostname": "vic\tcountry_code", "active": True, "country_code": "nl",
+     "multihop_port": 3226, "ipv4_addr_in": "10.0.0.2"},
+    {"hostname": "ok-aaa-wg-001", "active": True, "country_code": "se",
+     "multihop_port": 3227, "ipv4_addr_in": "10.0.0.3"},
+    {"hostname": "ok-bbb-wg-001", "active": True, "country_code": "se",
+     "multihop_port": 3228, "ipv4_addr_in": "10.0.0.4",
+     "city_code": "x\nH\tfake-host-001"},
+], open(sys.argv[1], "w"))
+PY
+HJ="${tmp}/hostile.json"
+got="$(mullvad_relay_match "$HJ" "" | tr '\n' ' ')"
+[[ "$got" == "ok-aaa-wg-001 ok-bbb-wg-001 " ]] \
+  || note "a hostname or value carrying a newline or a tab must not reach the hostname table (got '${got}')"
+got="$(mullvad_relay_match "$HJ" za | tr '\n' ' ')"
+[[ -z "$got" ]] \
+  || note "a forged hostname must never be selectable as a candidate (got '${got}')"
+got="$(mullvad_relay_match "$HJ" fake | tr '\n' ' ')"
+[[ -z "$got" ]] \
+  || note "a forged hostname smuggled through a field VALUE must never be selectable (got '${got}')"
+got="$(mullvad_relay_field "$HJ" za-jnb-wg-999 country_code)"
+[[ -z "$got" ]] \
+  || note "a relay that is not in the list must have no fields (got '${got}')"
+got="$(mullvad_relay_field "$HJ" 'vic' country_code)"
+[[ -z "$got" ]] \
+  || note "a tab in a hostname must not let one relay answer for another's key (got '${got}')"
+mullvad_assert_multihop "$HJ" ok-aaa-wg-001 za-jnb-wg-999 2>/dev/null \
+  && note "a forged exit hostname must be rejected as not in the relay list"
+
+echo "the derived table's mode:"
+# 0600 for consistency with the pin, not for secrecy: the table holds only the
+# public Mullvad relay list, no secret and no record of the operator's choice.
+# The pin is 0600 on the reasoning that a file created at the ambient umask is
+# readable by every local user for as long as it exists, and a table at 0644
+# sitting next to it only raises the question of which of the two rules is real.
+# Checked under a deliberately loose umask so a pass cannot be an accident of
+# the ambient one.
+TBLJ="${tmp}/tblmode.json"
+cp "$J" "$TBLJ"
+rm -f "${TBLJ}.tbl"
+( umask 022; mullvad_relay_field "$TBLJ" bg-sof-wg-001 country_code >/dev/null )
+[[ "$(stat -f '%Lp' "${TBLJ}.tbl")" == "600" ]] \
+  || note "the derived table must be mode 600 regardless of umask (got '$(stat -f '%Lp' "${TBLJ}.tbl")')"
+
 echo "_mullvad_list_has:"
 # The candidate list is matched as literal strings. A corrupted pin read as a
 # basic regular expression could otherwise claim to be a candidate it does not

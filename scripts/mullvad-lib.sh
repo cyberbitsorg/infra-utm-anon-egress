@@ -62,6 +62,14 @@ mullvad_spec_matches() {
 # case that actually happens -- mullvad_load_relays mv'ing a refetched list over
 # the cache mid-run -- without hashing 500 KB on every lookup.
 #
+# The stamp also carries MULLVAD_TABLE_FORMAT, and that is not decoration. The
+# size/mtime part only notices a changed JSON, so a table written by an OLDER
+# build of this file goes on being read for as long as the relay list beneath it
+# is untouched -- up to the full 7-day cache life. Every rule below about what
+# may not be written into the table would then be enforced only for operators
+# who happened to refetch. Bump this whenever the writer's output changes
+# meaning, and every existing table is discarded on the next lookup.
+#
 # It is written next to the JSON (`<json>.tbl`), which needs no fallback: the
 # only relay list this repo reads is the one mullvad_load_relays put there, so a
 # directory it cannot write is a build that already died. `make destroy` removes
@@ -72,10 +80,33 @@ mullvad_spec_matches() {
 #   F<TAB><hostname><TAB><key><TAB><value>   fields of the FIRST relay with
 #                                            that hostname
 # "First" matches the `break` the per-call parse did, so a duplicated hostname
-# still answers from the same record it always did. A value containing a newline
-# is omitted rather than written, because it would forge a record; that reads
-# back as "unknown", which every caller already treats as fatal.
+# still answers from the same record it always did.
+#
+# The separators are load-bearing, so anything that could carry one is dropped
+# rather than written: a newline or tab in a HOSTNAME or a KEY, and a newline in
+# a VALUE. Without that, a relay list can forge records this file has no way to
+# tell from real ones -- a hostname of "inj\nH\tza-jnb-wg-999" put
+# `za-jnb-wg-999` into the H stream as a selectable candidate that is not in the
+# list, and a hostname of "vic\tcountry_code" made `mullvad_relay_field <json>
+# vic country_code` answer "hostname<TAB>vic<TAB>country_code". Both were
+# verified; both now yield nothing, which is what the per-call parse this
+# replaced did and what every caller already treats as fatal. A crafted relay
+# list is not a privilege boundary -- whoever can supply one can pick the exit
+# country with ordinary-looking JSON -- but answering about a relay that does
+# not exist is a different and worse failure than refusing to answer.
+#
+# Written 0600 for consistency with the pin, not for secrecy: the content is the
+# public Mullvad relay list and holds no secret and no record of the operator's
+# choice. The pin's rationale (a file at the ambient umask is readable by every
+# local user) is the repo's rule for everything it creates under generated/, and
+# a table at 0644 next to a pin at 0600 only invites a reader to work out which
+# of the two rules is the real one.
 # ---------------------------------------------------------------------------
+
+# Bumped whenever _mullvad_build_table's output changes meaning -- a new record
+# type, a different notion of "first", or another filter on what may be written.
+# 2: hostnames carrying a record or field separator are dropped.
+MULLVAD_TABLE_FORMAT=2
 
 _mullvad_stamp() {
   stat -f '%z %Fm' "${1:?}" 2>/dev/null || stat -c '%s %.9Y' "${1:?}" 2>/dev/null
@@ -83,7 +114,7 @@ _mullvad_stamp() {
 
 _mullvad_build_table() {
   python3 - "${1:?}" "${2:?}" "${3:?}" <<'PY'
-import json, sys
+import json, os, sys
 src, dest, stamp = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(src) as fh:
     relays = json.load(fh)
@@ -91,6 +122,8 @@ hosts, seen, fields = [], set(), []
 for r in relays:
     h = r.get("hostname")
     if not isinstance(h, str):
+        continue
+    if "\n" in h or "\t" in h:
         continue
     if r.get("active"):
         hosts.append(h)
@@ -104,7 +137,9 @@ for r in relays:
         if "\n" in s or "\n" in k or "\t" in k:
             continue
         fields.append("F\t%s\t%s\t%s\n" % (h, k, s))
-with open(dest, "w") as fh:
+fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, "w") as fh:
     fh.write(stamp + "\n")
     for h in sorted(hosts):
         fh.write("H\t%s\n" % h)
@@ -119,7 +154,7 @@ PY
 _mullvad_table() {
   local json="${1:?relay json required}" tbl stamp hdr tmp
   tbl="${json}.tbl"
-  stamp="# $(_mullvad_stamp "$json" || true)"
+  stamp="# v${MULLVAD_TABLE_FORMAT} $(_mullvad_stamp "$json" || true)"
   if [[ -s "$tbl" ]]; then
     hdr=""
     IFS= read -r hdr < "$tbl" || true
