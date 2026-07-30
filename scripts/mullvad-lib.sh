@@ -531,6 +531,20 @@ mullvad_render_to() {
   local entry_ip exit_port src
   src="${secrets_dir}/${exit_h}.conf"
   [[ -r "$src" ]] || { echo "no config for exit ${exit_h} at ${src}" >&2; return 1; }
+  # Warn, never fail, on a loose mode. This file holds the exit server's private
+  # key, and the documented happy path is "unpack Mullvad's whole bundle into
+  # secrets/" -- which is exactly how a directory of keys ends up world-readable
+  # at 0644. The MULLVAD_WG_CONFIG path has warned about this since Phase 2; the
+  # warning belongs here too, and arguably more, because this path is the one
+  # that encourages hundreds of key files instead of one.
+  #
+  # Only the mode is inspected, never the contents.
+  local src_perms
+  src_perms="$(stat -f '%Lp' "$src" 2>/dev/null || echo '')"
+  case "$src_perms" in
+    600|400|"") ;;
+    *) warn "${src} is mode ${src_perms}; it holds a private key. Fix the whole directory with: chmod 600 ${secrets_dir}/*.conf" ;;
+  esac
   entry_ip="$(mullvad_relay_field "$json" "$entry" ipv4_addr_in)"
   [[ "$entry_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || { echo "entry ${entry} has no IPv4 address in the relay list (got '${entry_ip}'). The endpoint must be an IP: resolving a name would need clear-net DNS before the tunnel exists." >&2; return 1; }
