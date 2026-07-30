@@ -14,9 +14,11 @@ intentionally vulnerable VMs.
 > WireGuard tunnel behind a fail-closed nftables kill-switch, resolves DNS only
 > through that tunnel, and drops IPv6 outright. The only clear-net traffic
 > anywhere is UDP to one WireGuard endpoint. `make verify` proves it, including
-> an active test that drops the tunnel and watches the WAN NIC. Phase 1 built the
-> isolation underneath; Phase 3 adds the Kali toolset and Mullvad Browser. See
-> `docs/superpowers/`.
+> an active test that drops the tunnel and watches the WAN NIC. The exit country
+> is chosen in `.env` and the multihop config is assembled at build time.
+>
+> Phase 1 built the isolation underneath. Phase 3 has landed the XFCE desktop and
+> Mullvad Browser; what remains of it is the Kali toolset. See `docs/superpowers/`.
 
 ## Architecture
 
