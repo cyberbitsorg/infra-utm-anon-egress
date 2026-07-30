@@ -5,7 +5,8 @@
 # is downloaded over the VPN, never over the real IP. That ordering is the reason
 # these lists stayed empty until Phase 2 worked.
 #
-# Phase 3 adds the Kali toolset and Mullvad Browser on top of this base.
+# Phase 3's desktop and Mullvad Browser sit on top of this base (see
+# workstation_desktop below). The Kali toolset is the part of Phase 3 still to come.
 common_packages:
   - ca-certificates
   - curl

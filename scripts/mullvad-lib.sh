@@ -62,6 +62,14 @@ mullvad_spec_matches() {
 # case that actually happens -- mullvad_load_relays mv'ing a refetched list over
 # the cache mid-run -- without hashing 500 KB on every lookup.
 #
+# The stamp also carries MULLVAD_TABLE_FORMAT, and that is not decoration. The
+# size/mtime part only notices a changed JSON, so a table written by an OLDER
+# build of this file goes on being read for as long as the relay list beneath it
+# is untouched -- up to the full 7-day cache life. Every rule below about what
+# may not be written into the table would then be enforced only for operators
+# who happened to refetch. Bump this whenever the writer's output changes
+# meaning, and every existing table is discarded on the next lookup.
+#
 # It is written next to the JSON (`<json>.tbl`), which needs no fallback: the
 # only relay list this repo reads is the one mullvad_load_relays put there, so a
 # directory it cannot write is a build that already died. `make destroy` removes
@@ -72,10 +80,33 @@ mullvad_spec_matches() {
 #   F<TAB><hostname><TAB><key><TAB><value>   fields of the FIRST relay with
 #                                            that hostname
 # "First" matches the `break` the per-call parse did, so a duplicated hostname
-# still answers from the same record it always did. A value containing a newline
-# is omitted rather than written, because it would forge a record; that reads
-# back as "unknown", which every caller already treats as fatal.
+# still answers from the same record it always did.
+#
+# The separators are load-bearing, so anything that could carry one is dropped
+# rather than written: a newline or tab in a HOSTNAME or a KEY, and a newline in
+# a VALUE. Without that, a relay list can forge records this file has no way to
+# tell from real ones -- a hostname of "inj\nH\tza-jnb-wg-999" put
+# `za-jnb-wg-999` into the H stream as a selectable candidate that is not in the
+# list, and a hostname of "vic\tcountry_code" made `mullvad_relay_field <json>
+# vic country_code` answer "hostname<TAB>vic<TAB>country_code". Both were
+# verified; both now yield nothing, which is what the per-call parse this
+# replaced did and what every caller already treats as fatal. A crafted relay
+# list is not a privilege boundary -- whoever can supply one can pick the exit
+# country with ordinary-looking JSON -- but answering about a relay that does
+# not exist is a different and worse failure than refusing to answer.
+#
+# Written 0600 for consistency with the pin, not for secrecy: the content is the
+# public Mullvad relay list and holds no secret and no record of the operator's
+# choice. The pin's rationale (a file at the ambient umask is readable by every
+# local user) is the repo's rule for everything it creates under generated/, and
+# a table at 0644 next to a pin at 0600 only invites a reader to work out which
+# of the two rules is the real one.
 # ---------------------------------------------------------------------------
+
+# Bumped whenever _mullvad_build_table's output changes meaning -- a new record
+# type, a different notion of "first", or another filter on what may be written.
+# 2: hostnames carrying a record or field separator are dropped.
+MULLVAD_TABLE_FORMAT=2
 
 _mullvad_stamp() {
   stat -f '%z %Fm' "${1:?}" 2>/dev/null || stat -c '%s %.9Y' "${1:?}" 2>/dev/null
@@ -83,7 +114,7 @@ _mullvad_stamp() {
 
 _mullvad_build_table() {
   python3 - "${1:?}" "${2:?}" "${3:?}" <<'PY'
-import json, sys
+import json, os, sys
 src, dest, stamp = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(src) as fh:
     relays = json.load(fh)
@@ -91,6 +122,8 @@ hosts, seen, fields = [], set(), []
 for r in relays:
     h = r.get("hostname")
     if not isinstance(h, str):
+        continue
+    if "\n" in h or "\t" in h:
         continue
     if r.get("active"):
         hosts.append(h)
@@ -104,7 +137,9 @@ for r in relays:
         if "\n" in s or "\n" in k or "\t" in k:
             continue
         fields.append("F\t%s\t%s\t%s\n" % (h, k, s))
-with open(dest, "w") as fh:
+fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, "w") as fh:
     fh.write(stamp + "\n")
     for h in sorted(hosts):
         fh.write("H\t%s\n" % h)
@@ -119,7 +154,7 @@ PY
 _mullvad_table() {
   local json="${1:?relay json required}" tbl stamp hdr tmp
   tbl="${json}.tbl"
-  stamp="# $(_mullvad_stamp "$json" || true)"
+  stamp="# v${MULLVAD_TABLE_FORMAT} $(_mullvad_stamp "$json" || true)"
   if [[ -s "$tbl" ]]; then
     hdr=""
     IFS= read -r hdr < "$tbl" || true
@@ -143,10 +178,23 @@ _mullvad_table() {
 # through `tr '\n' ' '` (as the test harness does) would see a single space
 # instead of empty output and its "-z" check for "no match" would stop working.
 #
-# The matches are collected and written ONCE, as the python this replaced did.
-# A line-at-a-time loop would take SIGPIPE from any consumer that stops early
-# (`grep -q`, `head`) and, under `set -o pipefail`, hand that failure to the
-# caller as "no match".
+# NOT SAFE FOR A CONSUMER THAT STOPS EARLY. The matches are collected and handed
+# to a single `printf`, but that is not one write(2): bash's printf goes through
+# stdio, which flushes a pipe in BUFSIZ-sized chunks (1 KB on macOS), so the
+# live 539-relay list leaves here as several writes. A consumer that exits at the
+# first line closes the pipe between two of them and this function dies of
+# SIGPIPE -- measured `mullvad_relay_match <json> "" | grep -qxF <first sorted
+# host>` = 141 on 30 of 30 runs -- which `set -o pipefail` then hands to the
+# caller as "no match". A line-at-a-time loop would fail the same way; one printf
+# only narrows the window, it does not close it.
+#
+# So do NOT write `mullvad_relay_match ... | grep -q` or `| head -1`. Capture the
+# list and search the string (`_mullvad_list_has`), or use a consumer that drains
+# it: `grep -c .`, `mullvad_pick_random`'s `cat`, a `while read` loop. Every
+# caller in this repo drains, and tests/mullvad-select.sh pins the one where
+# getting this wrong moves the operator's tunnel to another country
+# (`mullvad_pair_ok`), against a fixture big enough to span a flush -- a
+# ten-relay fixture fits in one write and proves nothing.
 mullvad_relay_match() {
   local json="${1:?relay json required}" spec="${2-}" tbl h out=""
   tbl="$(_mullvad_table "$json")" || return 1
@@ -265,6 +313,17 @@ mullvad_entry_candidates() {
 # anything in another jurisdiction, so the pool is filtered here rather than the
 # draw checked afterwards.
 #
+# A candidate whose country_code cannot be read is INELIGIBLE, not merely
+# different. mullvad_relay_field prints nothing for an absent field, so a bare
+# `!= "$exclude_cc"` test lets "" through -- and "" is not a country, it is the
+# absence of one. Such a candidate could then win the draw and abort the whole
+# build in mullvad_assert_multihop with "entry X is not in the relay list",
+# which is both wrong and unactionable, instead of being skipped so another of
+# the several hundred candidates is picked. It fails closed either way; the
+# difference is a build that succeeds versus a build that dies blaming the
+# operator. Theoretical against today's list (all 539 live relays carry every
+# field) and cheap to keep true.
+#
 # A function ending in an explicit `return 0`, exactly like
 # mullvad_exit_candidates and for exactly the same reason: a `while` loop
 # reports the status of its LAST iteration, so a final candidate that IS in the
@@ -276,10 +335,11 @@ mullvad_entry_candidates() {
 # this filter is a property of the filter, never of whichever relay happened to
 # be examined last.
 mullvad_entries_outside_country() {
-  local json="${1:?}" spec="${2-}" exclude_cc="${3:?}" h
+  local json="${1:?}" spec="${2-}" exclude_cc="${3:?}" h cc
   mullvad_entry_candidates "$json" "$spec" | while IFS= read -r h; do
     [[ -n "$h" ]] || continue
-    [[ "$(mullvad_relay_field "$json" "$h" country_code)" != "$exclude_cc" ]] && printf '%s\n' "$h"
+    cc="$(mullvad_relay_field "$json" "$h" country_code)"
+    [[ -n "$cc" && "$cc" != "$exclude_cc" ]] && printf '%s\n' "$h"
   done
   return 0
 }
@@ -471,6 +531,20 @@ mullvad_render_to() {
   local entry_ip exit_port src
   src="${secrets_dir}/${exit_h}.conf"
   [[ -r "$src" ]] || { echo "no config for exit ${exit_h} at ${src}" >&2; return 1; }
+  # Warn, never fail, on a loose mode. This file holds the exit server's private
+  # key, and the documented happy path is "unpack Mullvad's whole bundle into
+  # secrets/" -- which is exactly how a directory of keys ends up world-readable
+  # at 0644. The MULLVAD_WG_CONFIG path has warned about this since Phase 2; the
+  # warning belongs here too, and arguably more, because this path is the one
+  # that encourages hundreds of key files instead of one.
+  #
+  # Only the mode is inspected, never the contents.
+  local src_perms
+  src_perms="$(stat -f '%Lp' "$src" 2>/dev/null || echo '')"
+  case "$src_perms" in
+    600|400|"") ;;
+    *) warn "${src} is mode ${src_perms}; it holds a private key. Fix the whole directory with: chmod 600 ${secrets_dir}/*.conf" ;;
+  esac
   entry_ip="$(mullvad_relay_field "$json" "$entry" ipv4_addr_in)"
   [[ "$entry_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || { echo "entry ${entry} has no IPv4 address in the relay list (got '${entry_ip}'). The endpoint must be an IP: resolving a name would need clear-net DNS before the tunnel exists." >&2; return 1; }
