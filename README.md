@@ -70,14 +70,37 @@ from the generated inventory.
 
 ## Quick start
 
+**Step 0, before any `make` target: you need a Mullvad subscription.** The build
+has no tunnel without one, and *how you obtained it* decides whether any of the
+rest means anything. Read "Threat model, honestly" before you pay for it — the
+mistakes that matter are made here, not in the code.
+
 ```bash
+# 1. Get the account (external prerequisite)
+#    Pay with Monero or cash. A bank-linked payment ties the account to you.
+#    The account NUMBER is the only credential there is -- never paste it into a
+#    terminal, a chat, a shell history or an AI assistant. See the threat model.
+
+# 2. Download WireGuard configs from Mullvad's config generator into secrets/,
+#    named exactly <hostname>.conf -- e.g. nl-ams-wg-001.conf. Grabbing every
+#    country at once is fine; that is what MULLVAD_EXIT selects from.
+chmod 600 secrets/*.conf       # the bundle unpacks world-readable
+
+# 3. Build
 cp lab.conf.example lab.conf   # adjust if you want other names/sizes
 make preflight                 # checks tools; generates the SSH key and .env
+$EDITOR .env                   # set MULLVAD_EXIT, e.g. "nl"
 make up                        # images, VMs, cloud-init, Ansible
-make verify                    # assert the isolation property
+make verify                    # assert the isolation property -- read the output
 make ssh gateway               # direct, over the host port forward
 make ssh workstation           # via ProxyJump through the gateway
 ```
+
+`make preflight` refuses to build rather than guess: no configs in `secrets/` for
+the country you named, a pair that is not genuine multihop, or an unusable config
+all stop it **before any VM exists**, each with a message that says what to
+change. If it passes and `make verify` is green, read the "What is not" part of
+the threat model anyway — a green run is a narrower claim than it looks.
 
 `make up` is idempotent: re-running it reconciles cpu/ram of existing VMs and
 starts anything that is stopped. `make destroy` deletes both VMs and
@@ -531,26 +554,72 @@ the window instead.
 Target level: **provider-resistant and leak-proof**, with the correlation
 resistance that multihop buys and no more.
 
-Guaranteed and testable, today: no clear-traffic leak (fail-closed kill-switch,
-tunnel-only DNS, no IPv6), and provider resistance (anonymous acquisition,
-no-logs, entry and exit in different countries). **Not** guaranteed: absolute
-anonymity against a global passive adversary correlating traffic worldwide, or
-application-layer fingerprinting — a browser that identifies you does so equally
-well through a perfect tunnel. See `docs/superpowers/specs/` for the full
-statement.
+### What is guaranteed, and testable
 
-Two limits worth stating plainly:
+No clear-traffic leak — fail-closed kill-switch, tunnel-only DNS, no IPv6 — and
+provider resistance: entry and exit in different countries, so neither Mullvad
+server sees both who you are and where you went. `make verify` asserts all of it
+against the running lab, including an active test that drops the tunnel and
+watches the WAN NIC.
 
-- `make verify` asserts a **negative**, and a negative can only ever be tested
-  against the vectors someone thought of. It proves those specific vectors are
-  closed; it is not proof of anonymity.
-- The residual failure mode is `nftables.service` failing to load at all: with no
-  ruleset the kernel default is accept. That is why the ruleset is installed with
-  `nft -c` validation (an unparseable file cannot land in the first place) and why
-  forwarding is granted by that unit rather than by a persistent sysctl.
+### What is not
+
+**`make verify` green does not mean "I am anonymous."** It means the vectors
+someone thought of are closed. It asserts a negative, and a negative can only
+ever be tested against a list. Specifically, none of the following is covered by
+any check in this repo:
+
+- **Your Mullvad account number is your only credential.** There is no password
+  beside it. Anyone who reads it controls the account and can see its connection
+  metadata. Treat it like a private key: never paste it into a terminal, a chat,
+  an issue, a shell history or an AI assistant. Anything you type into a tool
+  that keeps a transcript is on disk in plaintext, indefinitely. If it has ever
+  leaked, generate a new account number and let the old one lapse — deleting the
+  transcript is not enough, and neither is deleting a config file.
+- **Deleting a key file does not revoke the key.** WireGuard keys stay valid at
+  Mullvad until you remove them there. Rotating locally and leaving the old one
+  registered means the old one still works.
+- **How you paid.** A bank-linked payment ties the account to your identity and
+  no tunnel repairs that. Monero or cash, or the exercise is theatre.
+- **The macOS host.** It is untrusted transport, deliberately out of scope.
+  Anything watching the Mac — a backup agent, an EDR tool, an MDM profile, a
+  screen recorder — sees everything before it ever reaches the tunnel.
+- **One request over your real IP.** Selecting an exit needs Mullvad's public
+  relay list, fetched from the Mac before the lab exists. It is cached for 7
+  days. `MULLVAD_WG_CONFIG` avoids it entirely.
+- **Application-layer fingerprinting.** A browser that identifies you does so
+  just as well through a perfect tunnel. That is what Mullvad Browser is for, and
+  why the workstation ships it rather than a hardened Firefox.
+- **Traffic-volume and timing correlation** by an adversary who sees both ends.
+  Multihop raises the cost; it does not remove the possibility.
+- **What you do inside the session.** Logging into an account that is yours ends
+  the exercise regardless of how clean the plumbing is.
+
+### Operator mistakes that break the guarantee
+
+These are the concrete actions, not abstractions. Each has bitten this repo or
+came within one change of doing so:
+
+| You do this | What goes wrong |
+|-------------|-----------------|
+| Edit `MULLVAD_EXIT`, then run `make verify` before `make configure` | You verify the **old** tunnel. The exit assertion now catches this, but the ordering is not intuitive: change `.env` → `make configure` → `make verify`. |
+| Change `nftables.conf.j2` or `verify.sh` and skip the negative control | A too-permissive forward rule passes every guest-side probe. This is not hypothetical: it happened, and only `tcpdump -Q out` on the WAN caught it. The recipe is in "What `make verify` proves". |
+| Unpack Mullvad's config bundle and leave it at the default mode | Hundreds of private keys world-readable. `make preflight` and the build now warn, but the warning scrolls past — `chmod 600 secrets/*.conf`. |
+| `apt install` a VPN client on the workstation | The check enumerates known clients plus any `network-manager-*` plugin. A client under an unfamiliar name is **not** caught. The workstation must never hold VPN credentials. |
+| Trust "the tests pass" | Tests can pass without testing anything. Ask for the mutation evidence instead: *break the guard and show me the test fails.* See `CLAUDE.md`. |
+| Reuse the workstation across engagements | It is disposable by design. `make destroy && make up` gives a fresh Kali and a fresh entry/exit pair. |
+| Run the lab while a host VPN is up | The vmnet bridge can hijack a route that falls inside its subnet. `make preflight` refuses; see "Host-only subnet". |
+
+### Residual technical failure mode
+
+`nftables.service` failing to load at all: with no ruleset, the kernel default is
+accept. That is why the ruleset is installed with `nft -c` validation — an
+unparseable file cannot land in the first place — and why forwarding is granted
+by that unit rather than by a persistent sysctl. `make verify` checks both.
 
 The VPN subscription is an external prerequisite, acquired anonymously — not a
 build step. Credentials live **only on the gateway**, never on the workstation.
+See `docs/superpowers/specs/` for the full statement.
 
 ## License
 
