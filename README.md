@@ -576,13 +576,28 @@ someone thought of are closed. It asserts a negative, and a negative can only
 ever be tested against a list. Specifically, none of the following is covered by
 any check in this repo:
 
-- **Your Mullvad account number is your only credential.** There is no password
-  beside it. Anyone who reads it controls the account and can see its connection
-  metadata. Treat it like a private key: never paste it into a terminal, a chat,
-  an issue, a shell history or an AI assistant. Anything you type into a tool
-  that keeps a transcript is on disk in plaintext, indefinitely. If it has ever
-  leaked, generate a new account number and let the old one lapse. Deleting the
-  transcript is not enough, and neither is deleting a config file.
+- **Your Mullvad account number is your only credential, and you cannot change
+  it.** There is no password beside it, no second factor, and no rotation: the
+  number is fixed for the life of the account, so recovering from a disclosure
+  means buying a *new* account and a new subscription. Brute force is not the
+  threat (16 digits against a rate-limited server is hopeless); disclosure is.
+  Treat it like a bearer token. Never paste it into a terminal, a chat, an issue,
+  a shell history or an AI assistant, and note that anything you type into a tool
+  that keeps a transcript sits on disk in plaintext, indefinitely.
+- **With an AI assistant attached to your editor, highlighting a secret is
+  enough.** The editor plugin sends your current selection along with whatever
+  you type, so the value reaches the assistant's context and its on-disk
+  transcript without you copying, pasting, or asking about it. Opening the file
+  is harmless (only the path is sent); selecting text in it is not. This is not a
+  hypothetical: it happened twice while this repo was being written, and is why
+  the warning exists.
+- **What a leaked account number actually costs you** is smaller than it looks,
+  which is worth knowing before you panic-buy a replacement. Someone holding it
+  can spend your remaining time, remove your WireGuard keys and add their own,
+  and generally disrupt you. They cannot read your traffic history, because
+  Mullvad does not keep it, and there is no email address or payment method
+  behind the account to expose if you bought it with cash or Monero. The damage
+  is theft of service and sabotage, not deanonymisation.
 - **Deleting a key file does not revoke the key.** WireGuard keys stay valid at
   Mullvad until you remove them there. Rotating locally and leaving the old one
   registered means the old one still works.
