@@ -436,13 +436,74 @@ mullvad_resolve_pair "$J" "$S_SINGLE" se-got "" "$PIN_SINGLE" >/dev/null 2>&1 \
   && note "a pinned exit that now resolves to port ${MULLVAD_SINGLEHOP_PORT} must be discarded on reuse, not kept because the hostnames still match"
 
 echo "mullvad_pair_ok (where the pin sits in the list must not matter):"
-# bg-sof-wg-001 is the FIRST of the seven sorted entry candidates, which is the
-# case a `candidates | grep -q "$entry"` gets wrong: grep exits at that first
-# line, the producer takes SIGPIPE writing the second, and pipefail turns a
-# perfectly legal pin into "re-resolve". The symptom is a tunnel that moves
-# country on a run where nothing changed.
+# mullvad_pair_ok captures each candidate list and searches the string. The
+# obvious spelling -- `mullvad_entry_candidates ... | grep -qxF "$entry"` -- is
+# wrong, and this is where that costs the operator something: grep exits at the
+# first match, mullvad_relay_match's printf takes SIGPIPE on its next stdio
+# flush, pipefail turns that into "this pin is no longer legal", and the tunnel
+# moves to another country on a run where nothing changed. That is the bug commit
+# c2e4520 fixed.
+#
+# SIZE IS WHAT GIVES THIS CASE TEETH. The ten-relay fixture cannot catch it: its
+# whole candidate list is about 100 bytes, one stdio flush, so nothing is ever
+# written to a closed pipe and the wrong spelling passes. Measured: with both
+# list checks restored to `| grep -qxF`, the case below on "$J" passed 10 of 10
+# runs. The second fixture is therefore 400 relays, whose candidate lists span
+# several 1 KB flushes; the same mutation fails it 10 of 10.
+#
+# It is the ENTRY check the mutation dies on, and deliberately so:
+# mullvad_relay_match is the only producer here with nothing between it and the
+# pipe. mullvad_exit_candidates ends in `return 0`, which swallows the SIGPIPE
+# death of its own while-loop -- so the exit half of that mutation survives, and
+# for the same reason no early-exit consumer of THAT function is at risk.
 mullvad_pair_ok "$J" "$S" nl "" bg-sof-wg-001 nl-ams-wg-001 \
   || note "a legal pin whose entry is the first candidate in the list must still be reused"
+
+# 200 bg entries and 200 nl exits, so the pinned entry (bg-sof-wg-001) and the
+# pinned exit (nl-ams-wg-001) are each FIRST in their own sorted list and an
+# early-exiting consumer stops as early as it possibly can. The exit configs are
+# empty files on purpose: candidacy is an `-r` test and nothing here reads them.
+BIGJ="${tmp}/big.json"
+BIGS="${tmp}/big-secrets"
+mkdir -p "$BIGS"
+{
+  printf '['
+  sep=""
+  i=1
+  while [[ "$i" -le 200 ]]; do
+    n="$(printf '%03d' "$i")"
+    printf '%s\n {"hostname":"bg-sof-wg-%s","active":true,"ipv4_addr_in":"10.1.0.1","multihop_port":%d,"country_code":"bg","city_code":"sof"}' \
+      "$sep" "$n" "$((3000 + i))"
+    sep=","
+    i=$((i + 1))
+  done
+  i=1
+  while [[ "$i" -le 200 ]]; do
+    n="$(printf '%03d' "$i")"
+    printf '%s\n {"hostname":"nl-ams-wg-%s","active":true,"ipv4_addr_in":"10.2.0.1","multihop_port":%d,"country_code":"nl","city_code":"ams"}' \
+      "$sep" "$n" "$((4000 + i))"
+    : > "${BIGS}/nl-ams-wg-${n}.conf"
+    i=$((i + 1))
+  done
+  printf '\n]\n'
+} > "$BIGJ"
+
+# Assert the fixture's two load-bearing properties before using it, or this case
+# silently degrades into the small one it exists to replace. Both lists are
+# CAPTURED rather than piped into `head`: piping them into an early-exit consumer
+# is the very thing under test, and doing it here would abort the suite under
+# pipefail instead of testing anything.
+bigentries="$(mullvad_entry_candidates "$BIGJ" "")"
+bigexits="$(mullvad_exit_candidates "$BIGJ" "$BIGS" nl)"
+[[ "${#bigentries}" -gt 1024 ]] \
+  || note "the entry candidate list must exceed one stdio flush (1 KB) or the SIGPIPE this case exists for cannot happen (got ${#bigentries} bytes)"
+[[ "${bigentries%%$'\n'*}" == "bg-sof-wg-001" ]] \
+  || note "the pinned entry must be the FIRST sorted entry candidate (got '${bigentries%%$'\n'*}')"
+[[ "${bigexits%%$'\n'*}" == "nl-ams-wg-001" ]] \
+  || note "the pinned exit must be the FIRST sorted exit candidate (got '${bigexits%%$'\n'*}')"
+
+mullvad_pair_ok "$BIGJ" "$BIGS" nl "" bg-sof-wg-001 nl-ams-wg-001 \
+  || note "a legal pin must be reused against a 400-relay list too: piping the candidate list into an early-exit consumer kills the producer with SIGPIPE and pipefail reports a still-legal pin as illegal, which moves the tunnel's country on a run where nothing changed"
 
 echo "the pin's mode:"
 # No key material in it, but it names the country the operator chose. Written

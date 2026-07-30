@@ -178,10 +178,23 @@ _mullvad_table() {
 # through `tr '\n' ' '` (as the test harness does) would see a single space
 # instead of empty output and its "-z" check for "no match" would stop working.
 #
-# The matches are collected and written ONCE, as the python this replaced did.
-# A line-at-a-time loop would take SIGPIPE from any consumer that stops early
-# (`grep -q`, `head`) and, under `set -o pipefail`, hand that failure to the
-# caller as "no match".
+# NOT SAFE FOR A CONSUMER THAT STOPS EARLY. The matches are collected and handed
+# to a single `printf`, but that is not one write(2): bash's printf goes through
+# stdio, which flushes a pipe in BUFSIZ-sized chunks (1 KB on macOS), so the
+# live 539-relay list leaves here as several writes. A consumer that exits at the
+# first line closes the pipe between two of them and this function dies of
+# SIGPIPE -- measured `mullvad_relay_match <json> "" | grep -qxF <first sorted
+# host>` = 141 on 30 of 30 runs -- which `set -o pipefail` then hands to the
+# caller as "no match". A line-at-a-time loop would fail the same way; one printf
+# only narrows the window, it does not close it.
+#
+# So do NOT write `mullvad_relay_match ... | grep -q` or `| head -1`. Capture the
+# list and search the string (`_mullvad_list_has`), or use a consumer that drains
+# it: `grep -c .`, `mullvad_pick_random`'s `cat`, a `while read` loop. Every
+# caller in this repo drains, and tests/mullvad-select.sh pins the one where
+# getting this wrong moves the operator's tunnel to another country
+# (`mullvad_pair_ok`), against a fixture big enough to span a flush -- a
+# ten-relay fixture fits in one write and proves nothing.
 mullvad_relay_match() {
   local json="${1:?relay json required}" spec="${2-}" tbl h out=""
   tbl="$(_mullvad_table "$json")" || return 1
