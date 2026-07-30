@@ -22,7 +22,7 @@ intentionally vulnerable VMs.
 
 > **Before you rely on this, read [Threat model,
 > honestly](#threat-model-honestly).** `make verify` asserts a negative, so it
-> proves the vectors someone thought of are closed — not that you are anonymous.
+> proves the vectors someone thought of are closed, not that you are anonymous.
 > The things most likely to undo the whole exercise (how you paid, where your
 > account number has been, what the Mac is running) sit outside anything this
 > code can check.
@@ -30,7 +30,7 @@ intentionally vulnerable VMs.
 ## Architecture
 
 ```
-   macOS host (untrusted transport — out of scope)
+   macOS host (untrusted transport, out of scope)
         | UTM SLIRP NAT (gateway only)
         v
    +-------------------+        internal-only vmnet-host segment
@@ -54,7 +54,7 @@ compromised workstation has no route out except through the gateway. That is the
 "cannot physically leak" property, and `make verify` asserts it.
 
 Because the workstation has no host port forward, the host reaches it by SSH
-**ProxyJump through the gateway** — including Ansible, which uses the same hop
+**ProxyJump through the gateway**, including Ansible, which uses the same hop
 from the generated inventory.
 
 ## Requirements
@@ -79,7 +79,7 @@ from the generated inventory.
 
 **Step 0, before any `make` target: you need a Mullvad subscription.** The build
 has no tunnel without one, and *how you obtained it* decides whether any of the
-rest means anything. Read "Threat model, honestly" before you pay for it — the
+rest means anything. Read "Threat model, honestly" before you pay for it. The
 mistakes that matter are made here, not in the code.
 
 ```bash
@@ -107,23 +107,23 @@ make ssh workstation           # via ProxyJump through the gateway
 the country you named, a pair that is not genuine multihop, or an unusable config
 all stop it **before any VM exists**, each with a message that says what to
 change. If it passes and `make verify` is green, read the "What is not" part of
-the threat model anyway — a green run is a narrower claim than it looks.
+the threat model anyway. A green run is a narrower claim than it looks.
 
 `make up` is idempotent: re-running it reconciles cpu/ram of existing VMs and
 starts anything that is stopped. `make destroy` deletes both VMs and
-`generated/`, keeping the base images — that is also the disposable-workstation
+`generated/`, keeping the base images. That is also the disposable-workstation
 mechanism: destroy, then `make up` clones a fresh Kali from the base image.
 
 ## How long `make up` takes, and how to watch it
 
-A full cold build — `make destroy`, then `make up` — is **measured at about
+A full cold build (`make destroy`, then `make up`) is **measured at about
 6.5 minutes** end to end on an M-series Mac, with the desktop and Mullvad Browser
 installed.
 
 **That figure excludes the base-image download**, which `make destroy` does not
 touch and which every build after the first reuses from `images/`. On a genuinely
-first-ever run, that download dominates everything on this page — the Kali image
-alone is ~25 GiB raw — and no measurement of the rest is a useful predictor of
+first-ever run, that download dominates everything on this page. The Kali image
+alone is ~25 GiB raw, and no measurement of the rest is a useful predictor of
 it. See the "Base images" row below.
 
 Of the 6.5 minutes, roughly half is the workstation's ~950-package desktop,
@@ -144,12 +144,12 @@ What `make up` does, in order:
 | Phase | What happens |
 |-------|--------------|
 | Preflight | tool checks, SSH key, `.env`, WireGuard config validation |
-| Base images | verified against their published checksums. **The first run ever downloads them**, and the Kali image alone is ~25 GiB raw — that download dominates everything else and can take tens of minutes on a slow link. Every later build reuses the cache |
+| Base images | verified against their published checksums. **The first run ever downloads them.** The Kali image alone is ~25 GiB raw, so that download dominates everything else and can take tens of minutes on a slow link. Every later build reuses the cache |
 | Staging | a per-VM disk is cloned from each base image and resized. Effectively free on APFS, which copies on write |
 | Provisioning | UTM creates and boots both VMs, then the build waits for SSH |
 | cloud-init | first boot: user, keys, static addressing |
-| Ansible — gateway | WireGuard, the kill-switch, unbound |
-| Ansible — workstation | packages, **a whole kernel, a 951-package desktop and a browser, all downloaded through the VPN**, then a reboot |
+| Ansible (gateway) | WireGuard, the kill-switch, unbound |
+| Ansible (workstation) | packages, **a whole kernel, a 951-package desktop and a browser, all downloaded through the VPN**, then a reboot |
 
 The last row is the one that scales with your tunnel: the workstation has no
 route of its own, so every byte it installs crosses the VPN. A slow exit node
@@ -159,7 +159,7 @@ only after the tunnel works.
 **Why it looks stuck.** Ansible prints a task's name and then nothing at all
 until that task finishes, so the longest steps are exactly the ones that show no
 output: `Install the standard Kali kernel`, `Install the Kali XFCE desktop`, the
-reboot handler after them, and — on a first-ever run — the image download before
+reboot handler after them, and, on a first-ever run, the image download before
 Ansible starts at all. The desktop task is the longest single silence in the
 build by a wide margin. Silence is normal; silence *plus an idle VM* is not.
 
@@ -181,7 +181,7 @@ make status                 # are both VMs actually running
 make console gateway        # serial console: real boot output, works on any kernel
 ```
 
-Or ask the gateway how far it has got — these flip on in this order:
+Or ask the gateway how far it has got. These flip on in this order:
 
 ```bash
 make ssh gateway
@@ -194,7 +194,7 @@ sudo wg show wg0 latest-handshakes     # non-zero means the tunnel is really up
 A task that sits for more than a few minutes while the VM is idle is a bug, not
 patience. The build reconfigures the network underneath its own SSH connection,
 so a rule that stops covering the management path drops both the replies *and*
-the RST — the control node is never told, and `make up` would hang indefinitely.
+the RST. The control node is never told, and `make up` would hang indefinitely.
 That is why `ansible.cfg` sets `ServerAliveInterval`: a connection that has truly
 stopped answering now fails the run in about two minutes with a real error
 instead of hanging. Both known instances of this are written up in the comments
@@ -233,15 +233,15 @@ your own values are safe. Read them back with `grep CONSOLE_PASSWORD .env`.
 
 Everything in `.env` is optional: an unset value means "do not configure that
 feature", never a broken build. Secrets reach Ansible through a `0600` temp vars
-file, never `-e key=value` — command-line arguments are visible to every user on
+file, never `-e key=value`, because command-line arguments are visible to every user on
 the host in `ps auxww`. The `group_vars` defaults stay empty strings on purpose,
 since those files *are* tracked.
 
 ### Host-only subnet (and the VPN collision it can cause)
 
 The internal segment rides an Apple **vmnet host-only** switch. That switch has
-its own subnet — the address the host side of the bridge (`bridge100` on the Mac)
-gets — and **macOS assigns it, not this repo**: UTM only asks vmnet for `host`
+its own subnet, the address the host side of the bridge (`bridge100` on the Mac)
+gets, and **macOS assigns it, not this repo**: UTM only asks vmnet for `host`
 mode, and macOS picks the bridge address itself (`192.168.128.0/24` by default),
 with no reliable knob to change it (see below). It is independent of
 `LAB_SEGMENT`, which is the static address space the guests use on that switch.
@@ -251,7 +251,7 @@ macOS default is `192.168.128.0/24`, and a WireGuard VPN (Squawker) used a tunne
 whose gateway was `192.168.128.1` inside a pushed `192.168.128.0/18`. Because a
 connected `/24` on `bridge100` outranks the tunnel's `/18`, macOS bound the VPN's
 `10.x` routes to the **bridge** instead of the tunnel. Symptom: the VPN client
-says "tunnel up", but hosts behind it are unreachable — the packets vanish into
+says "tunnel up", but hosts behind it are unreachable. The packets vanish into
 the VM switch. Confirm with `route -n get <ip>`; if `interface:` is `bridge…`
 rather than a `utun…`, this is it.
 
@@ -265,7 +265,7 @@ this repo does **not** try to move the bridge.
 Instead we treat the collision as a fail-closed condition. `HOST_ONLY_SUBNET` in
 `lab.conf` **declares the subnet the bridge actually uses** (`192.168.128.0/24`,
 the macOS default), and `make preflight` refuses to build while a live route's
-gateway lands inside it — which is exactly what a colliding VPN looks like. The
+gateway lands inside it, which is exactly what a colliding VPN looks like. The
 remedy is operational and 100% reliable: **bring the VPN down (or the VMs down)
 before building**, so the bridge and the tunnel are never up on the same range at
 once. Preflight also warns if the running bridge is on a subnet other than the
@@ -291,8 +291,8 @@ See [UTM #4932](https://github.com/utmapp/UTM/discussions/4932) and
 
 The gateway runs a **Mullvad multihop WireGuard tunnel**, and an nftables ruleset
 whose three chains are all `policy drop`. The only clear-net egress permitted
-anywhere is **UDP to one endpoint IP and port**. Everything else — the
-workstation's traffic, the gateway's own `apt`, unbound's upstream queries — goes
+anywhere is **UDP to one endpoint IP and port**. Everything else (the
+workstation's traffic, the gateway's own `apt`, unbound's upstream queries) goes
 through the tunnel or nowhere.
 
 ### Getting an account and a config
@@ -300,23 +300,23 @@ through the tunnel or nowhere.
 The subscription is an external prerequisite, not a build step, and how you buy
 it decides whether any of this means anything:
 
-- Pay with **Monero or cash**. Not iDEAL, not a card — a bank-linked payment ties
+- Pay with **Monero or cash**. Not iDEAL, not a card. A bank-linked payment ties
   the account to your identity and defeats the entire exercise.
 - Generate WireGuard configs on Mullvad's site. **Every config their generator
-  emits is single-hop**, one per server — there is no multihop option to tick.
+  emits is single-hop**, one per server, and there is no multihop option to tick.
   Getting a second hop is a change you or this repo makes afterwards.
 - Then pick one of two ways to get there, and set exactly one of them in `.env`
   (they are mutually exclusive, and setting both is refused):
-  - **`MULLVAD_EXIT`** — drop the downloaded configs into `secrets/` as
+  - **`MULLVAD_EXIT`**: drop the downloaded configs into `secrets/` as
     `<hostname>.conf` and name the exit country. The build assembles multihop
     for you; see "Choosing the exit country" below. This is the easier path and
     the one `make verify` can check.
-  - **`MULLVAD_WG_CONFIG`** — point it at a multihop config you assembled
+  - **`MULLVAD_WG_CONFIG`**: point it at a multihop config you assembled
     yourself, saved outside this repo and `chmod 600`. The whole config is the
     artifact, so no keys are ever transcribed by hand.
 
 The endpoint **must be an IP address, not a hostname**. Resolving a hostname to
-bring the tunnel up would need clear-net DNS before the tunnel exists — a leak by
+bring the tunnel up would need clear-net DNS before the tunnel exists, a leak by
 construction. `make preflight` validates the config it is going to use, either
 way, and tells you exactly what is wrong if it is not usable.
 
@@ -338,8 +338,8 @@ One config per server must sit in `secrets/` as `<hostname>.conf`. Mullvad's
 config generator will hand you every server at once; drop them in.
 
 **The build assembles multihop for you.** A Mullvad multihop config is the exit
-server's own config with one line changed — `Endpoint = <entry ip>:<exit
-multihop port>` — and that is exactly what the build writes, to a `0600` temp
+server's own config with one line changed: `Endpoint = <entry ip>:<exit
+multihop port>`. That is exactly what the build writes, to a `0600` temp
 file that never persists. It is assembled twice: `make preflight` builds one to
 validate it and throws it away, and the copy that actually reaches the gateway
 is assembled during `make up` / `make configure` from the same pinned pair.
@@ -366,7 +366,7 @@ Egressing via *some* Mullvad exit was never the claim worth making.
 
 **A fetch happens over your real IP.** Selecting a server needs Mullvad's public
 relay list (`https://api.mullvad.net/www/relays/wireguard/`), and it is fetched
-from your Mac, not through the tunnel — during `make up` there is no tunnel to
+from your Mac, not through the tunnel. During `make up` there is no tunnel to
 use yet. It is cached in `generated/` for 7 days. Note that `make configure`
 needs the list too (it assembles the config itself, and never runs preflight),
 so a configure-only run against a cache older than 7 days makes that same
@@ -386,7 +386,7 @@ and ignores any pin left over from an earlier lab.
 This is a feature and it will surprise you at least once. With `wg0` down the
 gateway cannot `apt update`, cannot resolve a name, and cannot reach anything at
 all except the one WireGuard endpoint. The workstation gets no ICMP, no TCP and
-no DNS. Management SSH from the host keeps working — that is the repair path, it
+no DNS. Management SSH from the host keeps working. That is the repair path, and it
 arrives on the port forward and cannot carry traffic outward.
 
 Forwarding follows the same rule: `net.ipv4.ip_forward` is **0 on disk** and is
@@ -396,8 +396,8 @@ everything, so it is made impossible rather than merely unlikely.
 
 ### DNS
 
-`unbound` on the gateway listens on `10.20.0.1` and loopback — never the WAN NIC
-— and forwards only to Mullvad's in-tunnel resolver. There is no second, clear-net
+`unbound` on the gateway listens on `10.20.0.1` and loopback, never the WAN NIC,
+and forwards only to Mullvad's in-tunnel resolver. There is no second, clear-net
 forwarder: a fallback resolver *is* a DNS leak. The workstation's own `:53`
 traffic to any external resolver is dropped in the forward chain, so a program
 that hardcodes `8.8.8.8` fails instead of quietly bypassing the resolver.
@@ -427,7 +427,7 @@ than it looks like it needs to be:
   shipped exactly that bug. Testing only *new* connections after tunnel-down
   passes cleanly while the hole is wide open.
 - **Asking the guest is not the same as watching the wire.** A leaked packet can
-  leave un-SNATed with source `10.20.0.10`, for which SLIRP has no return path —
+  leave un-SNATed with source `10.20.0.10`, for which SLIRP has no return path,
   so no reply ever comes back and a reply-based probe calls that "blocked". When
   this was tested with a deliberately permissive forward rule, every guest-side
   check reported OK while the workstation's packets were leaving the WAN NIC.
@@ -462,7 +462,7 @@ LAB_VMS=(
 ```
 
 The **role** decides the NIC layout, and that is not configurable in `lab.conf`
-on purpose — the security property depends on it:
+on purpose. The security property depends on it:
 
 | Role | NIC layout | Reached from the host by |
 |------|-----------|--------------------------|
@@ -475,7 +475,7 @@ derive that port from index 1.
 
 ## Consoles and the UTM display
 
-A distro's **`-cloud` kernel flavour is built with no DRM drivers at all** — no
+A distro's **`-cloud` kernel flavour is built with no DRM drivers at all**: no
 virtio-gpu, no framebuffer. A guest running one sees UTM's display device
 (`lspci` shows the Virtio GPU) but nothing binds to it, so UTM reports "Display
 output is not active" forever. That single fact drives the setup here:
@@ -483,7 +483,7 @@ output is not active" forever. That single fact drives the setup here:
 | VM | Display in UTM | How |
 |----|----------------|-----|
 | `gateway` | **works** | Debian's `generic` image ships the standard `linux-image-arm64` kernel, which has `virtio_gpu`. Nothing to install. |
-| `workstation` | **works** | Kali publishes **only** the `genericcloud` variant, so Ansible swaps the kernel — which needs apt, which needs egress, which is why it waited for the tunnel. |
+| `workstation` | **works** | Kali publishes **only** the `genericcloud` variant, so Ansible swaps the kernel, which needs apt, which needs egress, which is why it waited for the tunnel. |
 
 Verify on either guest with `ls /sys/class/drm` (expect `card0`) and
 `cat /sys/class/graphics/fb0/name` (expect `virtio_gpudrmfb`).
@@ -491,7 +491,7 @@ Verify on either guest with `ls /sys/class/drm` (expect `card0`) and
 ### The Kali display, and why it waited
 
 The `workstation` role installs `linux-image-arm64`, points grub at it with
-`GRUB_DEFAULT=saved` and reboots — ported from the sibling lab's `attacker` role
+`GRUB_DEFAULT=saved` and reboots, ported from the sibling lab's `attacker` role
 along with its two hard-won details: grub sorts the `cloud` flavour *ahead* of the
 plain one at the same version, and purging the cloud kernel wedges the boot, so it
 stays installed as a fallback.
@@ -512,7 +512,7 @@ timeout. If you ever remove the tunnel, set `workstation_has_egress` back to
 
 The desktop itself sits on top of this. `kali-desktop-xfce` and Mullvad Browser
 are installed by the `workstation` role behind `workstation_desktop`, and log in
-through a `lightdm` greeter that deliberately **never** auto-logs in — the
+through a `lightdm` greeter that deliberately **never** auto-logs in: the
 console password in `.env` is required, and the role refuses to run without it.
 
 Two things about that install are worth knowing:
@@ -544,7 +544,7 @@ make console workstation
 - `cloud-init` sets `lock_passwd: true`, which would leave the console able to
   show boot output but not accept a login. The console passwords in `.env` unlock
   it (`chpasswd` on the guest, so no crypt/passlib needed on the control node), so
-  the console is a real recovery path — which matters most for the workstation,
+  the console is a real recovery path, which matters most for the workstation,
   whose only other access is through the gateway. **SSH stays key-only on both**
   (`passwordauthentication no`); these passwords are console/GUI only.
 - The role also removes the Kali image's agetty **auto-login drop-ins**, which
@@ -563,7 +563,7 @@ resistance that multihop buys and no more.
 
 ### What is guaranteed, and testable
 
-No clear-traffic leak — fail-closed kill-switch, tunnel-only DNS, no IPv6 — and
+No clear-traffic leak (fail-closed kill-switch, tunnel-only DNS, no IPv6), and
 provider resistance: entry and exit in different countries, so neither Mullvad
 server sees both who you are and where you went. `make verify` asserts all of it
 against the running lab, including an active test that drops the tunnel and
@@ -581,7 +581,7 @@ any check in this repo:
   metadata. Treat it like a private key: never paste it into a terminal, a chat,
   an issue, a shell history or an AI assistant. Anything you type into a tool
   that keeps a transcript is on disk in plaintext, indefinitely. If it has ever
-  leaked, generate a new account number and let the old one lapse — deleting the
+  leaked, generate a new account number and let the old one lapse. Deleting the
   transcript is not enough, and neither is deleting a config file.
 - **Deleting a key file does not revoke the key.** WireGuard keys stay valid at
   Mullvad until you remove them there. Rotating locally and leaving the old one
@@ -589,8 +589,8 @@ any check in this repo:
 - **How you paid.** A bank-linked payment ties the account to your identity and
   no tunnel repairs that. Monero or cash, or the exercise is theatre.
 - **The macOS host.** It is untrusted transport, deliberately out of scope.
-  Anything watching the Mac — a backup agent, an EDR tool, an MDM profile, a
-  screen recorder — sees everything before it ever reaches the tunnel.
+  Anything watching the Mac (a backup agent, an EDR tool, an MDM profile, a
+  screen recorder) sees everything before it ever reaches the tunnel.
 - **One request over your real IP.** Selecting an exit needs Mullvad's public
   relay list, fetched from the Mac before the lab exists. It is cached for 7
   days. `MULLVAD_WG_CONFIG` avoids it entirely.
@@ -611,7 +611,7 @@ came within one change of doing so:
 |-------------|-----------------|
 | Edit `MULLVAD_EXIT`, then run `make verify` before `make configure` | You verify the **old** tunnel. The exit assertion now catches this, but the ordering is not intuitive: change `.env` → `make configure` → `make verify`. |
 | Change `nftables.conf.j2` or `verify.sh` and skip the negative control | A too-permissive forward rule passes every guest-side probe. This is not hypothetical: it happened, and only `tcpdump -Q out` on the WAN caught it. The recipe is in "What `make verify` proves". |
-| Unpack Mullvad's config bundle and leave it at the default mode | Hundreds of private keys world-readable. `make preflight` and the build now warn, but the warning scrolls past — `chmod 600 secrets/*.conf`. |
+| Unpack Mullvad's config bundle and leave it at the default mode | Hundreds of private keys world-readable. `make preflight` and the build now warn, but the warning scrolls past. Run `chmod 600 secrets/*.conf`. |
 | `apt install` a VPN client on the workstation | The check enumerates known clients plus any `network-manager-*` plugin. A client under an unfamiliar name is **not** caught. The workstation must never hold VPN credentials. |
 | Trust "the tests pass" | Tests can pass without testing anything. Ask for the mutation evidence instead: *break the guard and show me the test fails.* See `CLAUDE.md`. |
 | Reuse the workstation across engagements | It is disposable by design. `make destroy && make up` gives a fresh Kali and a fresh entry/exit pair. |
@@ -620,11 +620,11 @@ came within one change of doing so:
 ### Residual technical failure mode
 
 `nftables.service` failing to load at all: with no ruleset, the kernel default is
-accept. That is why the ruleset is installed with `nft -c` validation — an
-unparseable file cannot land in the first place — and why forwarding is granted
+accept. That is why the ruleset is installed with `nft -c` validation, so an
+unparseable file cannot land in the first place, and why forwarding is granted
 by that unit rather than by a persistent sysctl. `make verify` checks both.
 
-The VPN subscription is an external prerequisite, acquired anonymously — not a
+The VPN subscription is an external prerequisite, acquired anonymously, not a
 build step. Credentials live **only on the gateway**, never on the workstation.
 See `docs/superpowers/specs/` for the full statement.
 
@@ -635,12 +635,12 @@ One rule matters more than the rest, and it is not obvious:
 > **A guard is not tested until someone has broken it and watched the test die.**
 
 "The suite is green" is nearly no information in this repo. Every property here is
-a *negative* — no leak, no VPN client, not the wrong country — and a negative
+a *negative* (no leak, no VPN client, not the wrong country), and a negative
 passes by default. A test that never exercises its guard, a probe that failed to
 run, and a genuinely closed gateway all produce the same silence.
 
 So when you add or change a guard: delete it, run the covering test, and confirm
-the test fails **through the assertion that names that behaviour** — not through
+the test fails **through the assertion that names that behaviour**, not through
 an unrelated crash. Then put it back. It costs a minute and it is the only thing
 that distinguishes a test that runs from a test that bites.
 
@@ -651,21 +651,21 @@ during development, and mutation is what exposed each one:
   empty result" were indistinguishable to every caller downstream
 - a required rejection branch no fixture could reach: deleting the guard left the
   suite green
-- a test for the entry/exit different-country rule — the whole point of multihop —
+- a test for the entry/exit different-country rule, the whole point of multihop,
   that caught its own regression in **14 of 30 runs**, because random selection
   landed on a legal pair often enough. Twenty green runs had proven *stability*,
   which is a different question from *sensitivity*
 - a production check weakened from `-s` to `-e` to satisfy a fixture that was
   itself wrong. Fix the fixture, never the guard
 - a code comment asserting a SIGPIPE-safety property the implementation did not
-  have — measured failing 30 times out of 30 against the real relay list
+  have, measured failing 30 times out of 30 against the real relay list
 - a regression test whose fixture was too small to trigger the condition it was
   written to catch
 
 Also: after **any** change to `nftables.conf.j2` or `scripts/verify.sh`, re-run
 the negative control in "What `make verify` proves". Guest-side probes cannot see
 a packet that leaves un-SNATed and gets no reply; only `tcpdump -Q out` on the WAN
-can. That is not a hypothetical — it is how a real leak was found here.
+can. That is not a hypothetical. It is how a real leak was found here.
 
 `make test` runs the shell unit tests with no UTM and no Mullvad account needed.
 `make lint` syntax-checks every script. Both are cheap; run them constantly.
