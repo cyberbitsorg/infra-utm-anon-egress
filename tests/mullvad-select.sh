@@ -562,6 +562,21 @@ rm -f "$PIN_MODE"
 [[ "$(stat -f '%Lp' "$PIN_MODE")" == "600" ]] \
   || note "the pin must be mode 600 regardless of umask (got '$(stat -f '%Lp' "$PIN_MODE")')"
 
+# ...and the ORDER, which the mode alone cannot see: a write-then-chmod
+# implementation also ends at 0600, it just leaves the hostnames world-readable
+# for the length of the write. What tells the two apart is the file's SIZE at the
+# moment chmod is called -- 0 if the file is still empty, non-zero if the content
+# is already in it. `chmod` is shadowed by a shell function for the duration of
+# one resolve, so what gets measured is the production line and not a copy of it.
+PIN_ORDER="${tmp}/chosen-order"
+rm -f "$PIN_ORDER" "${tmp}/pin-chmod-size"
+(
+  chmod() { stat -f '%z' "${2:-}" > "${tmp}/pin-chmod-size" 2>/dev/null; command chmod "$@"; }
+  mullvad_resolve_pair "$J" "$S" bg "" "$PIN_ORDER" >/dev/null
+)
+[[ "$(cat "${tmp}/pin-chmod-size" 2>/dev/null)" == "0" ]] \
+  || note "the pin must be created empty and chmodded BEFORE the hostnames are written; chmod saw a file of $(cat "${tmp}/pin-chmod-size" 2>/dev/null) byte(s), so the operator's chosen country was on disk at the ambient umask first"
+
 echo "mullvad_cache_fresh:"
 # A relay cache is never 0 bytes on a real machine (mullvad_load_relays only
 # ever mv's a JSON-validated file into place), but the check itself must not
@@ -669,6 +684,21 @@ mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived.conf"
 ( umask 022; mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived-umask.conf" )
 [[ "$(stat -f '%Lp' "${tmp}/derived-umask.conf")" == "600" ]] \
   || note "the derived config holds a private key and must be mode 600 regardless of umask"
+
+# The same order check as the pin's, and here it is a private key rather than a
+# country name that must not exist at the ambient umask even briefly. Mode alone
+# cannot distinguish create-chmod-write from write-then-chmod; the file's size at
+# the moment chmod runs can.
+DERIVED_ORDER="${tmp}/derived-order.conf"
+rm -f "$DERIVED_ORDER" "${tmp}/render-chmod-size"
+(
+  chmod() { stat -f '%z' "${2:-}" > "${tmp}/render-chmod-size" 2>/dev/null; command chmod "$@"; }
+  mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "$DERIVED_ORDER"
+)
+[[ "$(cat "${tmp}/render-chmod-size" 2>/dev/null)" == "0" ]] \
+  || note "the derived config must be created empty and chmodded BEFORE the exit's private key is written; chmod saw a file of $(cat "${tmp}/render-chmod-size" 2>/dev/null) byte(s)"
+diff <(grep -v '^Endpoint' "${S}/bg-sof-wg-001.conf") <(grep -v '^Endpoint' "${tmp}/derived.conf") >/dev/null \
+  || note "the derived config must differ from the exit's config only in Endpoint"
 
 echo "verify.sh exit-country assertion:"
 # This is verify.sh's decision logic, not mullvad-lib.sh's, but it lives here
