@@ -20,6 +20,13 @@ intentionally vulnerable VMs.
 > Phase 1 built the isolation underneath. Phase 3 has landed the XFCE desktop and
 > Mullvad Browser; what remains of it is the Kali toolset. See `docs/superpowers/`.
 
+> **Before you rely on this, read [Threat model,
+> honestly](#threat-model-honestly).** `make verify` asserts a negative, so it
+> proves the vectors someone thought of are closed — not that you are anonymous.
+> The things most likely to undo the whole exercise (how you paid, where your
+> account number has been, what the Mac is running) sit outside anything this
+> code can check.
+
 ## Architecture
 
 ```
@@ -620,6 +627,48 @@ by that unit rather than by a persistent sysctl. `make verify` checks both.
 The VPN subscription is an external prerequisite, acquired anonymously — not a
 build step. Credentials live **only on the gateway**, never on the workstation.
 See `docs/superpowers/specs/` for the full statement.
+
+## If you change this code
+
+One rule matters more than the rest, and it is not obvious:
+
+> **A guard is not tested until someone has broken it and watched the test die.**
+
+"The suite is green" is nearly no information in this repo. Every property here is
+a *negative* — no leak, no VPN client, not the wrong country — and a negative
+passes by default. A test that never exercises its guard, a probe that failed to
+run, and a genuinely closed gateway all produce the same silence.
+
+So when you add or change a guard: delete it, run the covering test, and confirm
+the test fails **through the assertion that names that behaviour** — not through
+an unrelated crash. Then put it back. It costs a minute and it is the only thing
+that distinguishes a test that runs from a test that bites.
+
+This is not defensive boilerplate. All of the following shipped looking correct
+during development, and mutation is what exposed each one:
+
+- a helper printing a bare newline on zero matches, so "nothing matched" and "one
+  empty result" were indistinguishable to every caller downstream
+- a required rejection branch no fixture could reach: deleting the guard left the
+  suite green
+- a test for the entry/exit different-country rule — the whole point of multihop —
+  that caught its own regression in **14 of 30 runs**, because random selection
+  landed on a legal pair often enough. Twenty green runs had proven *stability*,
+  which is a different question from *sensitivity*
+- a production check weakened from `-s` to `-e` to satisfy a fixture that was
+  itself wrong. Fix the fixture, never the guard
+- a code comment asserting a SIGPIPE-safety property the implementation did not
+  have — measured failing 30 times out of 30 against the real relay list
+- a regression test whose fixture was too small to trigger the condition it was
+  written to catch
+
+Also: after **any** change to `nftables.conf.j2` or `scripts/verify.sh`, re-run
+the negative control in "What `make verify` proves". Guest-side probes cannot see
+a packet that leaves un-SNATed and gets no reply; only `tcpdump -Q out` on the WAN
+can. That is not a hypothetical — it is how a real leak was found here.
+
+`make test` runs the shell unit tests with no UTM and no Mullvad account needed.
+`make lint` syntax-checks every script. Both are cheap; run them constantly.
 
 ## License
 
