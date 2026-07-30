@@ -313,6 +313,17 @@ mullvad_entry_candidates() {
 # anything in another jurisdiction, so the pool is filtered here rather than the
 # draw checked afterwards.
 #
+# A candidate whose country_code cannot be read is INELIGIBLE, not merely
+# different. mullvad_relay_field prints nothing for an absent field, so a bare
+# `!= "$exclude_cc"` test lets "" through -- and "" is not a country, it is the
+# absence of one. Such a candidate could then win the draw and abort the whole
+# build in mullvad_assert_multihop with "entry X is not in the relay list",
+# which is both wrong and unactionable, instead of being skipped so another of
+# the several hundred candidates is picked. It fails closed either way; the
+# difference is a build that succeeds versus a build that dies blaming the
+# operator. Theoretical against today's list (all 539 live relays carry every
+# field) and cheap to keep true.
+#
 # A function ending in an explicit `return 0`, exactly like
 # mullvad_exit_candidates and for exactly the same reason: a `while` loop
 # reports the status of its LAST iteration, so a final candidate that IS in the
@@ -324,10 +335,11 @@ mullvad_entry_candidates() {
 # this filter is a property of the filter, never of whichever relay happened to
 # be examined last.
 mullvad_entries_outside_country() {
-  local json="${1:?}" spec="${2-}" exclude_cc="${3:?}" h
+  local json="${1:?}" spec="${2-}" exclude_cc="${3:?}" h cc
   mullvad_entry_candidates "$json" "$spec" | while IFS= read -r h; do
     [[ -n "$h" ]] || continue
-    [[ "$(mullvad_relay_field "$json" "$h" country_code)" != "$exclude_cc" ]] && printf '%s\n' "$h"
+    cc="$(mullvad_relay_field "$json" "$h" country_code)"
+    [[ -n "$cc" && "$cc" != "$exclude_cc" ]] && printf '%s\n' "$h"
   done
   return 0
 }

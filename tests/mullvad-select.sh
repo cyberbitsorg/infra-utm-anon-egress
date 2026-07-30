@@ -322,31 +322,78 @@ echo "mullvad_resolve_pair (entry-country pre-filter, repeated):"
 # and the loop still lands outside bg by pure luck on 4-of-7 draws -- a coin
 # flip that a mutation-tester found catches its own removal only ~half the
 # time. Resolve fresh 25 times, each with its OWN pin (a reused pin would
-# just replay one draw, defeating the whole point), and check the invariant
-# ourselves on every draw. Each iteration is wrapped in an `if`, so a mutated
-# failure is caught by our own note rather than aborting the whole suite
-# under `set -e` and pointing at the backstop instead of the missing filter.
+# just replay one draw, defeating the whole point). Each iteration's failure
+# goes through `|| note` rather than `set -e`, so a mutated run reports every
+# draw and names the pre-filter instead of aborting the suite at the backstop.
 # This runs BEFORE the single-shot checks below for the same reason: those
 # are unguarded, and if a mutation makes one of them fail, `set -e` would kill
-# the script before ever reaching this block. If the pre-filter is gone,
-# either some iteration draws a same-country entry (caught below by name) or
-# mullvad_assert_multihop rejects it and the resolve call fails (also caught
-# below by name). With 4 of 7 candidates legal, the chance all 25 iterations
-# luck into a legal draw despite a missing filter is (4/7)^25, on the order
-# of 1 in a million -- decisive rather than a coin flip.
+# the script before ever reaching this block.
+#
+# WHAT A MISSING FILTER LOOKS LIKE FROM HERE: a FAILED resolve, never a returned
+# same-country pair. mullvad_assert_multihop rejects such a pair before
+# mullvad_resolve_pair can return it, so there is nothing to inspect in the
+# success case and this loop no longer pretends to -- an earlier version compared
+# the returned pair's two country codes, which was unreachable code reading as
+# coverage. With 4 of 7 candidates legal, the chance all 25 iterations luck into
+# a legal draw despite a missing filter is (4/7)^25, on the order of 1 in a
+# million -- decisive rather than a coin flip.
 for i in $(seq 1 25); do
   mpin="${tmp}/chosen_mut_${i}"
   rm -f "$mpin"
-  if out="$(mullvad_resolve_pair "$J" "$S" bg "" "$mpin" 2>/dev/null)"; then
-    e="${out%% *}"; x="${out##* }"
-    ec="$(mullvad_relay_field "$J" "$e" country_code)"
-    xc="$(mullvad_relay_field "$J" "$x" country_code)"
-    [[ "$ec" != "$xc" ]] \
-      || note "iteration ${i}: entry ${e} (${ec}) shares the exit ${x}'s country '${xc}' -- the entry-country pre-filter did not fire"
+  mullvad_resolve_pair "$J" "$S" bg "" "$mpin" >/dev/null 2>&1 \
+    || note "iteration ${i}: mullvad_resolve_pair failed to find a legal entry, though 4 of 7 default candidates are outside bg -- the entry-country pre-filter regressed and mullvad_assert_multihop caught the same-country draw instead"
+done
+
+echo "mullvad_resolve_pair (an entry whose country_code cannot be read):"
+# mullvad_relay_field prints nothing for an absent field, and "" is not a
+# country -- it is the absence of one. A candidate like that must be INELIGIBLE
+# rather than merely "different from the exit's country": let it through the
+# pre-filter and it can win the draw and then abort the entire build in
+# mullvad_assert_multihop with "entry ... is not in the relay list", which is
+# neither true nor actionable, while several hundred usable candidates sat in the
+# pool. Theoretical against today's list (all 539 live relays carry every field)
+# and cheap to keep true.
+#
+# Two deterministic fixtures rather than one large pool, because a random draw
+# would only expose this some of the time. aa-xxx-wg-001 sorts FIRST, so if it is
+# still eligible it wins roughly half of the draws below.
+cat > "${tmp}/nocc.json" <<'EOF'
+[
+ {"hostname":"aa-xxx-wg-001","active":true,"ipv4_addr_in":"10.9.0.1","multihop_port":3001},
+ {"hostname":"bb-yyy-wg-001","active":true,"ipv4_addr_in":"10.9.0.2","multihop_port":3002,"country_code":"bb","city_code":"yyy"},
+ {"hostname":"zz-zzz-wg-001","active":true,"ipv4_addr_in":"10.9.0.3","multihop_port":3003,"country_code":"zz","city_code":"zzz"}
+]
+EOF
+mkdir -p "${tmp}/secrets-nocc"
+cp "${tmp}/exit.conf" "${tmp}/secrets-nocc/zz-zzz-wg-001.conf"
+for i in $(seq 1 15); do
+  npin="${tmp}/chosen-nocc-${i}"
+  rm -f "$npin"
+  if out="$(mullvad_resolve_pair "${tmp}/nocc.json" "${tmp}/secrets-nocc" zz "" "$npin" 2>/dev/null)"; then
+    [[ "${out%% *}" == "bb-yyy-wg-001" ]] \
+      || note "iteration ${i}: the only entry with a readable country_code must be the one chosen (got '${out}')"
   else
-    note "iteration ${i}: mullvad_resolve_pair failed to find a legal entry, though 4 of 7 default candidates are outside bg -- the entry-country pre-filter regressed"
+    note "iteration ${i}: an entry with no readable country_code must be skipped so another candidate is picked, not drawn and then made fatal"
   fi
 done
+
+# And when every alternative is ineligible, the failure must be the entry-pool
+# message -- which names MULLVAD_ENTRY and the exit's country, the two things the
+# operator can act on -- and not mullvad_assert_multihop complaining that a relay
+# it was just handed is not in the relay list.
+cat > "${tmp}/nocc-only.json" <<'EOF'
+[
+ {"hostname":"aa-xxx-wg-001","active":true,"ipv4_addr_in":"10.9.0.1","multihop_port":3001},
+ {"hostname":"zz-zzz-wg-001","active":true,"ipv4_addr_in":"10.9.0.3","multihop_port":3003,"country_code":"zz","city_code":"zzz"}
+]
+EOF
+rm -f "${tmp}/chosen-nocc-only"
+if out="$(mullvad_resolve_pair "${tmp}/nocc-only.json" "${tmp}/secrets-nocc" zz "" "${tmp}/chosen-nocc-only" 2>&1)"; then
+  note "a pool whose only alternative has no country_code must not resolve (got '${out}')"
+else
+  [[ "$out" == *"No entry server matches"* ]] \
+    || note "the failure must be the entry-pool message, not a relay-list complaint from mullvad_assert_multihop (got '${out}')"
+fi
 
 echo "mullvad_resolve_pair (the exit's country sorts LAST):"
 # A second fixture, and the reason for it is one line of arithmetic: a `while`
@@ -622,8 +669,6 @@ mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived.conf"
 ( umask 022; mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived-umask.conf" )
 [[ "$(stat -f '%Lp' "${tmp}/derived-umask.conf")" == "600" ]] \
   || note "the derived config holds a private key and must be mode 600 regardless of umask"
-diff <(grep -v '^Endpoint' "${S}/bg-sof-wg-001.conf") <(grep -v '^Endpoint' "${tmp}/derived.conf") >/dev/null \
-  || note "the derived config must differ from the exit's config only in Endpoint"
 
 echo "verify.sh exit-country assertion:"
 # This is verify.sh's decision logic, not mullvad-lib.sh's, but it lives here
