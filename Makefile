@@ -65,6 +65,7 @@ test: ## Run the shell unit tests (no UTM needed)
 	@bash tests/wg-config.sh
 	@bash tests/vpn-pkg-scan.sh
 	@bash tests/tool-groups.sh
+	@bash tests/vpn-watch-list.sh
 	@bash tests/mullvad-select.sh
 
 lint: ## Syntax-check scripts and Ansible

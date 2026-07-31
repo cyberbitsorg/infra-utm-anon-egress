@@ -247,37 +247,13 @@
   # scripts/verify.sh asserts this same set stays absent -- and, unlike this
   # list, matches network-manager-* by pattern, so a plugin a future Kali adds is
   # caught even though nothing here purged it.
+  #
+  # The list itself now lives in group_vars as workstation_vpn_watch_list,
+  # shared with tools.yaml. It is a superset of what this task used to name:
+  # mullvad-vpn (apt-pinned, so this is a no-op), wireguard, wireguard-tools and
+  # the strongswan metapackage were only in verify.sh's copy before.
   ansible.builtin.apt:
-    name:
-      # The NetworkManager VPN plugins the desktop recommends.
-      - network-manager-openvpn
-      - network-manager-openvpn-gnome
-      - network-manager-pptp
-      - network-manager-pptp-gnome
-      - network-manager-l2tp
-      - network-manager-l2tp-gnome
-      - network-manager-openconnect
-      - network-manager-openconnect-gnome
-      - network-manager-vpnc
-      - network-manager-vpnc-gnome
-      - network-manager-fortisslvpn
-      - network-manager-fortisslvpn-gnome
-      # The clients those plugins drove, which outlive them.
-      - openvpn
-      - openconnect
-      - vpnc
-      - vpnc-scripts
-      - pptp-linux
-      # strongswan, named as it is actually installed: Kali pulls the daemon
-      # packages, not the `strongswan` metapackage. The two libstrongswan
-      # packages go too -- not because a library can dial a tunnel, but because
-      # leaving them is the same orphaning mistake that left openvpn behind.
-      - strongswan-starter
-      - strongswan-charon
-      - strongswan-libcharon
-      - libcharon-extauth-plugins
-      - libstrongswan
-      - libstrongswan-standard-plugins
+    name: "{{ workstation_vpn_watch_list }}"
     state: absent
     purge: true
 

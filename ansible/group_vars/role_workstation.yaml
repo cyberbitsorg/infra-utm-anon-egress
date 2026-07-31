@@ -55,3 +55,65 @@ workstation_desktop: true
 # the gateway or its own sshd fails, the UTM console is the way in.
 # SSH is key-only regardless of this setting.
 workstation_console_password: ""
+
+# --- Kali toolset ------------------------------------------------------------
+# Which Kali function groups to install, WITHOUT the kali-tools- prefix. The
+# real value comes from KALI_TOOL_GROUPS in lab.conf, handed to Ansible through
+# the 0600 vars file by scripts/up.sh; an empty selection omits the variable
+# entirely, so this default is what decides that "no selection" means "no
+# tooling". Never put a build's selection here: this file is tracked.
+workstation_tools_groups: []
+
+# Every package that must never be installed on this host, because each one is a
+# VPN client (or the library half of one) and this host must hold no VPN
+# credentials at all.
+#
+# TWO consumers, deliberately not merged. desktop.yaml and tools.yaml PURGE
+# this list; scripts/verify.sh keeps its own copy and independently ASSERTS the
+# same set stayed absent. An assertion reading the same variable the removal
+# used would pass by construction. tests/vpn-watch-list.sh pins the two copies
+# to each other so they cannot drift apart unnoticed.
+#
+# Measured 2026-07-30: the kali-linux-headless/-default/-large/-everything
+# umbrellas pull openvpn, vpnc and vpnc-scripts (-everything adds
+# wireguard-tools). No kali-tools-* group pulls any of them, which is why the
+# toolset is built from those groups and the umbrellas are unselectable.
+workstation_vpn_watch_list:
+  # Mullvad's own client, which their repository carries for arm64. An apt pin
+  # blocks it; this catches it arriving any other way.
+  - mullvad-vpn
+  # The NetworkManager VPN plugins the desktop recommends.
+  - network-manager-openvpn
+  - network-manager-openvpn-gnome
+  - network-manager-pptp
+  - network-manager-pptp-gnome
+  - network-manager-l2tp
+  - network-manager-l2tp-gnome
+  - network-manager-openconnect
+  - network-manager-openconnect-gnome
+  - network-manager-vpnc
+  - network-manager-vpnc-gnome
+  - network-manager-fortisslvpn
+  - network-manager-fortisslvpn-gnome
+  # The clients those plugins drove, which outlive them. This guest was measured
+  # carrying working openvpn, openconnect, vpnc, pptp and strongswan binaries
+  # with every plugin already gone.
+  - openvpn
+  - openconnect
+  - vpnc
+  - vpnc-scripts
+  - pptp-linux
+  - wireguard
+  - wireguard-tools
+  # strongswan, named both as it is actually installed (the daemon packages) and
+  # as the metapackage, which is not installed today but would be on an image
+  # that pulls it. The two libstrongswan packages go too, not because a library
+  # can dial a tunnel, but because leaving them is the same orphaning mistake
+  # that left openvpn behind.
+  - strongswan
+  - strongswan-starter
+  - strongswan-charon
+  - strongswan-libcharon
+  - libcharon-extauth-plugins
+  - libstrongswan
+  - libstrongswan-standard-plugins
