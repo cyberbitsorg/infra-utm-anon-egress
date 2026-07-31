@@ -249,9 +249,14 @@ cidr_contains() {
 # Dies on anything else, naming the value. The charset is not cosmetic: the name
 # ends up on an apt command line inside the guest.
 parse_tool_groups() {
-  local raw="${1-${KALI_TOOL_GROUPS:-}}" g seen=" "
+  local raw="${1-${KALI_TOOL_GROUPS:-}}" g seen=" " noglob_was_on
   # Unquoted on purpose: the selection is a space-separated list and this is the
-  # word splitting that reads it. bash 3.2 has no arrays worth using here.
+  # word splitting that reads it. Pathname expansion (*, ?, [...]) must be
+  # disabled so these characters are not silently expanded to directory names
+  # before the charset guard rejects them. Save and restore the caller's noglob
+  # setting: some callers may rely on globbing being on.
+  noglob_was_on=$(set -o | grep -c "^noglob.*on" || true)
+  set -f
   # shellcheck disable=SC2086
   for g in $raw; do
     [[ "$g" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
@@ -263,6 +268,7 @@ parse_tool_groups() {
     seen="${seen}${g} "
     printf '%s\n' "$g"
   done
+  if (( ! noglob_was_on )); then set +f; fi
 }
 
 # Render the validated selection as the single Ansible variable the workstation

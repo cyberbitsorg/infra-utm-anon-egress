@@ -65,6 +65,30 @@ checkfails parse_tool_groups 'Web'
 checkfails parse_tool_groups '-web'
 checkfails parse_tool_groups 'web.passwords'
 checkfails parse_tool_groups 'web_passwords'
+# Pathname expansion: * ? and [...] must be rejected before glob expansion happens.
+# The function is called from repo root (ansible docs scripts tests exist here),
+# so unquoted expansion would accept directory names. These must be caught by the
+# charset guard, not silently accepted as glob tokens.
+# Before the fix, * expands to ansible, docs, ... and parse_tool_groups would
+# print "ansible" before dying on "ansible.cfg". That means the glob-expanded
+# name was accepted. The test must reject these patterns directly, not allow them
+# to partially match before failing on later expansions.
+output=$(parse_tool_groups '*' 2>&1) || true
+if echo "$output" | grep -q '^[a-z0-9-]'; then
+  echo "  FAIL parse_tool_groups * should not accept directory names (got: $(echo "$output" | head -1))"
+  fail=1
+fi
+output=$(parse_tool_groups '?' 2>&1) || true
+if echo "$output" | grep -q '^[a-z0-9-]'; then
+  echo "  FAIL parse_tool_groups ? should not accept directory names"
+  fail=1
+fi
+output=$(parse_tool_groups '[a-z]*' 2>&1) || true
+if echo "$output" | grep -q '^[a-z0-9-]'; then
+  echo "  FAIL parse_tool_groups '[a-z]*' should not accept directory names"
+  fail=1
+fi
+checkfails parse_tool_groups 'web *'
 
 echo "render_tool_groups_var:"
 check "$(render_tool_groups_var 'web passwords')" "workstation_tools_groups: [web, passwords]" "renders a flow list"
