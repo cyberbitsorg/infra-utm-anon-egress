@@ -230,6 +230,61 @@ cidr_contains() {
   (( (netint & mask) == (ipint & mask) ))
 }
 
+# --- Kali tool groups -------------------------------------------------------
+# KALI_TOOL_GROUPS in lab.conf names Kali function groups WITHOUT the
+# `kali-tools-` prefix ("web passwords"). The prefix is prepended by the
+# workstation role, never typed by the operator, and that asymmetry is a
+# security control rather than a convenience: measured on 2026-07-30, all 29
+# kali-tools-* groups pull no VPN package at all, while kali-linux-headless,
+# -default, -large and -everything all pull openvpn, vpnc and vpnc-scripts
+# (-everything adds wireguard-tools). Those four are the ones that would trip
+# verify.sh's no-VPN-client assertion, and none of them can be expressed here.
+#
+# Prints one validated, deduplicated group name per line on stdout, first-seen
+# order, and prints NOTHING AT ALL for an empty selection -- not a blank line.
+# This repo has already shipped a helper that printed a bare newline on zero
+# matches, which made "nothing matched" indistinguishable from one empty result
+# and left every `while read` consumer looping once on an empty value.
+#
+# Dies on anything else, naming the value. The charset is not cosmetic: the name
+# ends up on an apt command line inside the guest.
+parse_tool_groups() {
+  local raw="${1-${KALI_TOOL_GROUPS:-}}" g seen=" "
+  # Unquoted on purpose: the selection is a space-separated list and this is the
+  # word splitting that reads it. bash 3.2 has no arrays worth using here.
+  # shellcheck disable=SC2086
+  for g in $raw; do
+    [[ "$g" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+      || die "KALI_TOOL_GROUPS contains an invalid group name: '${g}'. Use lowercase Kali group names, digits and dashes only."
+    case "$g" in
+      kali-*) die "KALI_TOOL_GROUPS contains '${g}': group names are written WITHOUT the kali- prefix (write 'web', not 'kali-tools-web'). This also means kali-linux-large and its siblings cannot be selected here, which is deliberate: they pull VPN clients onto a host that must never hold one." ;;
+    esac
+    case "$seen" in *" ${g} "*) continue ;; esac
+    seen="${seen}${g} "
+    printf '%s\n' "$g"
+  done
+}
+
+# Render the validated selection as the single Ansible variable the workstation
+# role consumes. It rides the same 0600 vars file as the secrets for one reason
+# only: that file is the only channel up.sh has to ansible-playbook, and
+# `-e key=value` is banned repo-wide because arguments are visible in `ps auxww`.
+#
+# An empty selection emits NOTHING, so the tracked group_vars default keeps
+# deciding what "no groups" means -- the same rule as an unset secret. Group
+# names are [a-z0-9-] by the time they get here, so a plain YAML flow list needs
+# no quoting.
+render_tool_groups_var() {
+  local groups line out=""
+  groups="$(parse_tool_groups "$@")" || return 1
+  [[ -n "$groups" ]] || return 0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    out="${out}${out:+, }${line}"
+  done <<<"$groups"
+  printf 'workstation_tools_groups: [%s]\n' "$out"
+}
+
 # --- SSH --------------------------------------------------------------------
 # Host-key options every connection in this repo uses. These VMs are disposable
 # by design -- 'make destroy && make up' hands the workstation a brand new host
