@@ -119,10 +119,10 @@ mechanism: destroy, then `make up` clones a fresh Kali from the base image.
 
 A full cold build (`make destroy`, then `make up`) is **measured at about
 6.5 minutes** end to end on an M-series Mac, with the desktop and Mullvad Browser
-installed and `KALI_TOOL_GROUPS` empty (the default). Selecting tool groups adds
-time on top of this figure, roughly proportional to their package count over the
-tunnel; see "Kali toolset" below for a measured incremental install, not a
-whole-build figure.
+installed. That figure assumes `KALI_TOOL_GROUPS` is empty, the default.
+Selecting tool groups adds time on top of it, roughly proportional to their
+package count over the tunnel; see "Kali toolset" below for a measured
+incremental install, not a whole-build figure.
 
 **That figure excludes the base-image download**, which `make destroy` does not
 touch and which every build after the first reuses from `images/`. On a genuinely
@@ -558,10 +558,11 @@ independently, both that no VPN client is installed and that every configured
 group is.
 
 Everything is downloaded through the multihop tunnel, never over the real IP.
-That is the reason it is slow: a group is 300 to 650 packages. Installing
-`top10` and `web` (301 and 609 new packages, per the group-size measurement
-above) with `make configure` against an already-provisioned workstation was
-measured on 2026-07-31 at **4m 5s** wall-clock (`time`'s own line:
+That is the reason it is slow: a group is 300 to 650 packages (the per-group
+sizes are listed in `lab.conf.example`). Installing `top10` and `web`, 301 and
+609 new packages respectively, with `make configure` against an
+already-provisioned workstation was measured on 2026-07-31 at **4m 5s**
+wall-clock (`time`'s own line:
 `4:05.48 total`), leaving `dpkg-query -W | wc -l` at 1966 packages and `df -h /`
 at 12G used of 59G. Re-running `make configure` immediately afterwards changed
 nothing on either host, which is the idempotency the role is supposed to have
