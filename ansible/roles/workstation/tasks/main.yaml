@@ -1,6 +1,7 @@
 ---
-# The Kali toolset and Mullvad Browser land in Phase 3. What is here now is the
-# console kernel and the console's security posture.
+# Phase 3 is complete here: the console kernel and the console's security
+# posture below, then the desktop and Mullvad Browser in desktop.yaml, then the
+# Kali toolset in tools.yaml.
 #
 # EVERYTHING here that touches the network must stay behind
 # workstation_has_egress: this host reaches a package mirror ONLY because the
@@ -133,3 +134,11 @@
   ansible.builtin.include_tasks: desktop.yaml
   when: workstation_desktop | default(false) | bool
   tags: [desktop]
+
+# MUST come after the desktop include: a tool group can pull GUI applications
+# that expect a desktop to register themselves against, and the desktop's own
+# NetworkManager neutralisation must already be in place before several hundred
+# more packages arrive.
+- name: Install the Kali toolset
+  ansible.builtin.include_tasks: tools.yaml
+  tags: [tools]
