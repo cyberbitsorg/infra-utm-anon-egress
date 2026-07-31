@@ -504,6 +504,43 @@ while read -r short role vm_idx; do
       else
         ok "${short} has no VPN client installed: none of the named clients, and no network-manager-* plugin beyond the desktop's own (credentials stay on the gateway)"
       fi
+
+      # 3b. Every tool group KALI_TOOL_GROUPS asked for is actually installed.
+      #
+      # This reuses the dump above rather than making a second round trip, and
+      # that reuse is what makes it trustworthy: the dump has already been
+      # proven to have run (dpkg-query exited 0) and to have really read the
+      # status database (the base-files canary). A fresh query here could come
+      # back empty from a dead connection and read as "nothing installed".
+      #
+      # It exists because an apt run that died halfway through the tunnel leaves
+      # a build that looks entirely successful: Ansible reported ok, the
+      # workstation boots, and the tools are simply absent. Nothing else in this
+      # suite would notice.
+      if [[ "$role" == "workstation" ]]; then
+        # parse_tool_groups dies on an invalid selection, and it dies inside
+        # THIS command substitution's subshell -- so without the explicit
+        # failure branch the empty output would read as "no groups configured"
+        # and print green. That is exactly the silence this suite refuses.
+        if ! groups_list="$(parse_tool_groups)"; then
+          note_fail "KALI_TOOL_GROUPS in lab.conf is invalid (see the error above); the toolset on ${short} cannot be asserted"
+        else
+          groups_missing=""; groups_seen=0
+          while IFS= read -r grp; do
+            [[ -n "$grp" ]] || continue
+            groups_seen=$((groups_seen + 1))
+            vpn_pkg_present "$vpn_dump" "kali-tools-${grp}" \
+              || groups_missing="${groups_missing}kali-tools-${grp} "
+          done <<<"$groups_list"
+          if (( groups_seen == 0 )); then
+            ok "${short} has no tool groups configured (KALI_TOOL_GROUPS is empty)"
+          elif [[ -n "$groups_missing" ]]; then
+            note_fail "${short} is missing tool group(s) that KALI_TOOL_GROUPS asked for: ${groups_missing% } (the apt run did not finish, or the selection changed without a re-run of 'make configure')"
+          else
+            ok "${short} has all ${groups_seen} configured tool group(s) installed"
+          fi
+        fi
+      fi
     fi
   fi
 
