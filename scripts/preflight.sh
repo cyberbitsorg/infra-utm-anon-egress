@@ -147,7 +147,6 @@ fi
 # vmnet default 192.168.128.0/24 and the 10.x routes vanished into bridge100.)
 # HOST_ONLY_SUBNET declares the range the operator set the plist to; refuse to
 # build while it collides, and flag drift between the plist and this declaration.
-
 host_only="${HOST_ONLY_SUBNET:-172.16.20.0/24}"
 log "Checking host-only subnet ${host_only} for route collisions"
 collision=""

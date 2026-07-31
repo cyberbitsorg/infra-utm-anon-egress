@@ -17,8 +17,9 @@ intentionally vulnerable VMs.
 > an active test that drops the tunnel and watches the WAN NIC. The exit country
 > is chosen in `.env` and the multihop config is assembled at build time.
 >
-> Phase 1 built the isolation underneath. Phase 3 has landed the XFCE desktop and
-> Mullvad Browser; what remains of it is the Kali toolset. See `docs/superpowers/`.
+> Phase 1 built the isolation underneath. Phase 3 is complete: the XFCE desktop,
+> Mullvad Browser, and a Kali toolset selected per function in `lab.conf`. See
+> `docs/superpowers/`.
 
 > **Before you rely on this, read [Threat model,
 > honestly](#threat-model-honestly).** `make verify` asserts a negative, so it
@@ -118,7 +119,10 @@ mechanism: destroy, then `make up` clones a fresh Kali from the base image.
 
 A full cold build (`make destroy`, then `make up`) is **measured at about
 6.5 minutes** end to end on an M-series Mac, with the desktop and Mullvad Browser
-installed.
+installed and `KALI_TOOL_GROUPS` empty (the default). Selecting tool groups adds
+time on top of this figure, roughly proportional to their package count over the
+tunnel; see "Kali toolset" below for a measured incremental install, not a
+whole-build figure.
 
 **That figure excludes the base-image download**, which `make destroy` does not
 touch and which every build after the first reuses from `images/`. On a genuinely
@@ -526,6 +530,48 @@ Two things about that install are worth knowing:
   the interface nor rewrite `/etc/resolv.conf`. A GUI VPN wizard on the one host
   that must never hold VPN credentials is not a cosmetic concern, and neither is
   a daemon that rewrites the resolver this design depends on.
+
+### Kali toolset
+
+`KALI_TOOL_GROUPS` in `lab.conf` picks which Kali function groups the
+workstation gets, space separated, without the `kali-tools-` prefix:
+
+```bash
+KALI_TOOL_GROUPS="top10 web passwords"
+```
+
+Empty is a legitimate build: a bare Kali with the desktop and browser.
+
+The prefix is prepended by the code and never typed, which is a security
+control rather than a convenience. Measured on 2026-07-30 with `apt-get -s`
+against the live archive: all 29 `kali-tools-*` groups pull no VPN package at
+all, while `kali-linux-headless`, `-default` and `-large` each pull `openvpn`,
+`vpnc` and `vpnc-scripts`, and `kali-linux-everything` adds `wireguard-tools`.
+Those four are exactly what `make verify`'s no-VPN-client assertion would fail
+on, and none of them can be named in `KALI_TOOL_GROUPS`.
+
+The measurement is not trusted on its own. Kali can add a `Recommends` at any
+time, so the role re-checks after every install: anything on the watch list
+that is present gets purged, and a purge that would take the requested tools
+with it fails the build instead of running. `make verify` then asserts,
+independently, both that no VPN client is installed and that every configured
+group is.
+
+Everything is downloaded through the multihop tunnel, never over the real IP.
+That is the reason it is slow: a group is 300 to 650 packages. Installing
+`top10` and `web` (301 and 609 new packages, per the group-size measurement
+above) with `make configure` against an already-provisioned workstation was
+measured on 2026-07-31 at **4m 5s** wall-clock (`time`'s own line:
+`4:05.48 total`), leaving `dpkg-query -W | wc -l` at 1966 packages and `df -h /`
+at 12G used of 59G. Re-running `make configure` immediately afterwards changed
+nothing on either host, which is the idempotency the role is supposed to have
+at this size too.
+
+That figure is an incremental install on top of an existing desktop, not a
+whole-build number: it starts from a workstation that already has cloud-init,
+the kernel swap and the desktop done, so it is not directly comparable to the
+"How long `make up` takes" figures above, which are measured with
+`KALI_TOOL_GROUPS` empty (the default).
 
 ### Serial console (works on both, any kernel)
 

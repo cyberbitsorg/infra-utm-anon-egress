@@ -229,10 +229,13 @@
   # the strongswan IKE daemon. Purging the GUI while leaving the client behind
   # removes the convenience and keeps the capability, which is the wrong half.
   #
-  # Every name here was checked before being added, and none of them cascades:
-  # `apt-get -s purge` on the whole set removes exactly these ten packages and
-  # nothing else -- no kali-desktop-xfce, no lightdm, no network-manager, no
-  # Mullvad Browser. Re-run that simulation before adding to this list; if a
+  # Every name here was checked before being added -- see the group_vars
+  # comments on workstation_vpn_watch_list for what each addition found -- and
+  # this task purges only the named list, never autoremove (see below), so it
+  # cannot cascade into kali-desktop-xfce, lightdm, network-manager or Mullvad
+  # Browser by side effect. The list has grown since this comment last counted
+  # it (it names 27 packages now, not the ten it shipped with); re-check any
+  # new name against `apt-get -s purge <name>` before adding it, and if a
   # package ever turns out to be load-bearing for XFCE, leave it installed and
   # document it rather than breaking the desktop.
   #
