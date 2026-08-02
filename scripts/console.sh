@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
-# Attach to a VM's serial console. Usage: console.sh <short-name>
-#
-# WHY this exists: both base images run the distro's '-cloud' kernel flavour,
-# which ships NO DRM drivers at all (no virtio-gpu, no framebuffer). The guest
-# sees UTM's virtio-gpu-pci device but nothing ever binds to it, so UTM's display
-# view correctly reports "Display output is not active" and always will. The
-# guests put their kernel console and a getty on ttyAMA0 instead, and UTM exposes
-# that serial device to the host as a pseudo-tty. This attaches to it.
-#
-# The pty path (/dev/ttysNNN) is assigned by UTM at VM start and CHANGES on every
-# boot, so it is queried live rather than remembered.
-#
-# NOTE: with cloud-init's lock_passwd this console shows boot output and a login
-# prompt you cannot get past -- it is a diagnostic channel, not a way in. Set a
-# console password deliberately if you want it to be a recovery path too.
+# Attach to a VM's serial console (ttyAMA0, exposed by UTM as a pseudo-tty).
+# Works on any kernel, which makes it the recovery path when the display or
+# network is what is broken. The pty path changes on every VM start, so it is
+# queried live. Without a console password (.env) the login prompt cannot be
+# passed: diagnostic channel only.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_config
 

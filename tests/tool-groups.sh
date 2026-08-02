@@ -3,31 +3,15 @@
 # the bridge from KALI_TOOL_GROUPS in lab.conf to the Ansible variable the
 # workstation role installs from.
 #
-# Two things here are load-bearing rather than cosmetic:
+# Two things here are load-bearing: a group name ends up on an apt command line
+# inside the guest (the charset rule is what keeps that from being an injection
+# path), and the kali-tools- prefix is prepended by the code, never typed,
+# which is what makes the kali-linux-* umbrellas inexpressible.
 #
-#   1. A group name ends up on an `apt` command line inside the guest. The
-#      charset rule is what keeps operator input from being an injection path.
-#   2. The `kali-tools-` prefix is prepended by the code, never typed. That is
-#      what makes kali-linux-large inexpressible -- it and its three siblings
-#      are the only Kali metapackages measured to drag openvpn/vpnc onto a host
-#      that must never hold a VPN client.
-#
-# Mutation evidence, so this file is not just green by default. Each mutation
-# was applied, run, and reverted; each failure arrived through the assertion
-# that names the behaviour, never through a generic abort:
-#
-#   - Weaken the charset test to `[[ -n "$g" ]]`: every injection case below
-#     fails ("web; rm -rf /", "web&&reboot", "$(id)", "web/../../etc", "Web",
-#     "-web", "web.passwords", "web_passwords"), each on its own
-#     "should have been rejected" line.
-#   - Delete the `case "$g" in kali-*)` block: all four umbrella cases fail,
-#     plus the render_tool_groups_var one.
-#   - Remove the `set -f` handling: the glob cases below fail with the expanded
-#     name visible ("got: ansible"), which is what proves the old order was
-#     accept-then-die rather than a clean rejection. That is the bug this file
-#     was extended to catch: those assertions only bite from the repo root,
-#     where "ansible", "docs", "scripts" and "tests" are real directories whose
-#     names pass the charset rule.
+# Mutation: weaken the charset test to `[[ -n "$g" ]]` (every injection case
+# fails), delete the `kali-*` case (all four umbrella cases fail), or drop the
+# `set -f` handling (the glob cases fail showing an expanded directory name --
+# they only bite from the repo root, where those names exist).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # load_config is never called here, so no lab.conf and no fake vars are needed.

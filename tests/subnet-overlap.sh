@@ -2,14 +2,11 @@
 # Unit test for ip_to_int and cidr_contains in scripts/lib.sh -- the IPv4 math
 # behind preflight's host-only-subnet collision guard. No UTM, no lab.conf.
 #
-# The guard exists because a VPN whose tunnel gateway lands inside the vmnet
-# host-only subnet gets silently hijacked by UTM's bridge. The load-bearing case
-# is therefore "is this gateway IP inside that /24", exercised both ways below,
-# including the exact 192.168.128.1-in-192.168.128.0/24 collision that motivated it.
+# The load-bearing case is "is this gateway IP inside that /24", exercised both
+# ways below, including the 192.168.128.1-in-192.168.128.0/24 collision the
+# guard exists for.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# lib.sh's config helpers are not used here, but require_lab_conf_vars is only
-# called from load_config, which we never invoke -- so no fake vars are needed.
 source scripts/lib.sh
 
 fail=0
@@ -47,7 +44,7 @@ checkrc 0 cidr_contains 172.16.20.0/24   172.16.20.0
 checkrc 0 cidr_contains 172.16.20.0/24   172.16.20.255
 checkrc 1 cidr_contains 172.16.20.0/24   172.16.21.0
 checkrc 1 cidr_contains 172.16.20.0/24   172.16.19.255
-# The wide tunnel range that overlapped the /24 vmnet net (Squawker's /18).
+# A wide pushed tunnel range overlapping the /24 vmnet net.
 checkrc 0 cidr_contains 192.168.128.0/18 192.168.191.255  # last address in /18
 checkrc 1 cidr_contains 192.168.128.0/18 192.168.192.0    # first address past it
 # A host route (/32) matches only itself.

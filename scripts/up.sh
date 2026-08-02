@@ -9,9 +9,8 @@ SCRIPTS="$(dirname "${BASH_SOURCE[0]}")"
 
 require_macos
 load_config
-# Secrets are loaded here rather than inside load_config on purpose: only this
-# script needs them, and the unit tests call load_config with a throwaway
-# lab.conf -- they must never pull in the operator's real .env as a side effect.
+# Loaded here, not inside load_config: the unit tests call load_config and
+# must never pull in the operator's real .env as a side effect.
 load_env
 
 MODE="all"
@@ -26,19 +25,9 @@ run_ansible() {
   log "Installing Ansible Galaxy requirements"
   ansible-galaxy collection install -r "${ANSIBLE_DIR}/requirements.yaml" >/dev/null
 
-  # Secrets from .env go to Ansible through a 0600 file, never through
-  # -e key=value: command-line arguments are visible to every user on the host in
-  # `ps auxww`, so a password passed that way is public for the length of the run.
-  # Non-secret configuration stays in group_vars and the generated inventory.
-  #
-  # The file is now created unconditionally (not just when secrets is non-empty):
-  # it also carries the sanitised WireGuard config path and endpoint below.
-  # Content is accumulated in $vars_content and written ONCE at the bottom
-  # (via vars_or_empty_mapping), rather than streamed straight to disk as each
-  # piece becomes available: ansible-playbook's `-e @file` rejects a blank or
-  # whitespace-only file outright ("could not be made into a dictionary"),
-  # even though it is valid (if empty) YAML, and the only way to know whether
-  # the file will end up truly empty is to have gathered everything first.
+  # Secrets go to Ansible through a 0600 file, never `-e key=value` (visible in
+  # `ps auxww`). Content is accumulated and written ONCE via vars_or_empty_mapping,
+  # because ansible-playbook rejects a blank `-e @file` outright.
   local vars_file vars_content secrets
   secrets="$(render_secret_vars)"
   vars_file="$(mktemp)"
@@ -50,22 +39,11 @@ run_ansible() {
   [[ -n "$secrets" ]] \
     && log "Passing $(grep -c ':' <<<"$secrets") secret(s) from .env via a 0600 vars file"
 
-  # The config is sanitised HERE, in bash, because that transformation is unit
-  # tested (tests/wg-config.sh) and because Ansible should receive a file that is
-  # already exactly what belongs on the gateway. The temp copy is 0600 and removed
-  # by the same trap as the vars file.
-  #
-  # mullvad_wg_config (emitted into $vars_content above by render_secret_vars)
-  # keeps meaning the operator's original .env path. The gateway role never
-  # reads that path directly -- it consumes the sanitised copy below, staged
-  # under a DIFFERENT key (mullvad_wg_sanitized) so the two never collide as
-  # duplicate YAML keys in the same vars file.
-  #
-  # Two sources for the same thing. MULLVAD_EXIT assembles a multihop config
-  # from the pinned pair; MULLVAD_WG_CONFIG uses the operator's own file.
-  # preflight.sh already rejected the case where both are set -- but
-  # `make configure` skips preflight, so the guard is repeated rather than
-  # assumed.
+  # The config is sanitised HERE, in bash, where the transformation is unit
+  # tested (tests/wg-config.sh). The sanitised copy is staged under its own key
+  # (mullvad_wg_sanitized); the role never reads the operator's original path.
+  # The both-set guard is repeated from preflight because `make configure`
+  # never runs preflight.
   local wg_src wg_tmp="" wg_built="" pair entry_host exit_host
   if [[ -n "${MULLVAD_WG_CONFIG:-}" && -n "${MULLVAD_EXIT:-}" ]]; then
     die "Both MULLVAD_WG_CONFIG and MULLVAD_EXIT are set in .env; they are mutually exclusive."
@@ -79,8 +57,7 @@ run_ansible() {
     mullvad_assert_multihop "$MULLVAD_RELAY_CACHE" "$entry_host" "$exit_host" \
       || die "The resolved pair is not multihop (reason above)."
     wg_built="$(mktemp)"
-    # Registered the moment the file exists, for the same reason as wg_tmp
-    # below: it is about to hold the exit server's private key.
+    # Registered the moment the file exists: it is about to hold a private key.
     trap "rm -f '${vars_file}' '${wg_built}'" EXIT
     mullvad_render_to "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \
         "$entry_host" "$exit_host" "$wg_built" \
@@ -95,10 +72,8 @@ run_ansible() {
     validate_wg_config "$wg_src" || die "The WireGuard config is not usable (reason above)."
     wg_tmp="$(mktemp)"
     chmod 600 "$wg_tmp"
-    # Trap updated the moment wg_tmp exists, BEFORE anything is written into
-    # it: a failure between creation and this point (a write error, a signal)
-    # would otherwise exit under `set -e` with only the vars_file half of the
-    # cleanup registered, leaving a file containing the private key behind.
+    # Trap updated BEFORE anything is written, so no failure path can leave a
+    # file containing the private key behind.
     trap "rm -f '${vars_file}' '${wg_tmp}' '${wg_built}'" EXIT
     sanitize_wg_config "$wg_src" > "$wg_tmp"
     vars_content="${vars_content}
@@ -108,11 +83,8 @@ mullvad_endpoint_port: '$(wg_endpoint_port "$wg_src")'"
     log "Sanitised WireGuard config staged (endpoint $(wg_endpoint_ip "$wg_src"):$(wg_endpoint_port "$wg_src"))"
   fi
 
-  # Not a secret, but it rides the same 0600 file because that file is the only
-  # channel this script has to ansible-playbook. Validation is repeated here
-  # rather than trusted from preflight for the same reason the
-  # MULLVAD_WG_CONFIG/MULLVAD_EXIT guard above is repeated: `make configure`
-  # never runs preflight.
+  # Not a secret, but the 0600 vars file is the only channel to
+  # ansible-playbook. Validation repeated: `make configure` skips preflight.
   local tool_groups_var
   tool_groups_var="$(render_tool_groups_var)"
   if [[ -n "$tool_groups_var" ]]; then
@@ -120,6 +92,11 @@ mullvad_endpoint_port: '$(wg_endpoint_port "$wg_src")'"
 ${tool_groups_var}"
     log "Kali tool groups: $(parse_tool_groups | tr '\n' ' ')"
   fi
+
+  local clipboard_var
+  clipboard_var="$(render_bool_var workstation_clipboard "${WORKSTATION_CLIPBOARD:-}")"
+  [[ -z "$clipboard_var" ]] || vars_content="${vars_content}
+${clipboard_var}"
 
   vars_or_empty_mapping "$vars_content" > "$vars_file"
 
@@ -156,9 +133,8 @@ done
   || die "No dual-NIC gateway in LAB_VMS. Every other VM is internal-only and unreachable without it."
 export GATEWAY_PORT LAB_USER
 
-# The gateway is waited on over its host forward. Internal-only VMs have no
-# forward, so they are probed through the gateway -- which is only possible once
-# the gateway itself answers, hence the two passes rather than one loop.
+# Two passes: internal-only VMs can only be probed through the gateway, so the
+# gateway must answer first.
 log "Waiting for the gateway to accept SSH"
 while read -r short role name port internal_ip nic_layout; do
   [[ "$nic_layout" == "dual" ]] || continue
@@ -170,10 +146,8 @@ jump_pc="$(ssh_jump_proxycommand "$GATEWAY_PORT")"
 while read -r short role name port internal_ip nic_layout; do
   [[ "$nic_layout" == "internal" ]] || continue
   deadline=$(( $(date +%s) + 420 ))
-  # The last error is kept and reported on timeout. Swallowing it makes a
-  # client-side failure (a bad ProxyCommand, a missing key) look exactly like a
-  # guest that has not booted yet, and you burn the full timeout before finding
-  # out the guest was up all along.
+  # The last ssh error is reported on timeout, so a client-side failure does
+  # not read as "the guest never booted".
   while :; do
     last_err="$(ssh -o ProxyCommand="$jump_pc" "${SSH_HOSTKEY_OPTS[@]}" \
                     -o ConnectTimeout=5 -o BatchMode=yes -i "$(priv_key)" \

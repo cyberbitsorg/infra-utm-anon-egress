@@ -1,58 +1,34 @@
 #!/usr/bin/env bash
-# Assert the security property this repo exists for. Hard-fails on any leak, so
-# it is safe to wire into CI or a post-build hook.
+# Assert the security property this repo exists for. Hard-fails on any leak.
 #
-# The contract depends on how far the build has got, so this script detects the
-# phase from the gateway itself rather than from a flag. A flag would eventually
-# disagree with reality, and this check must never pass because someone forgot to
-# flip it.
+# The phase is detected from the gateway itself, never from a flag:
+#   Phase 1 (no tunnel configured): the workstation reaches the gateway and
+#   nothing else. Phase 2 (a tunnel exists): the workstation has egress, and
+#   ONLY through the tunnel -- including an active kill-switch test that drops
+#   the tunnel and watches the WAN NIC directly.
 #
-#   Phase 1 (no tunnel configured): the workstation reaches the gateway, and
-#   nothing else. Zero egress is the correct state.
+# THE RULE THIS FILE IS BUILT AROUND: silence is never scored as security.
+# Every probe must be able to say "I ran and the answer was no" separately
+# from "I did not run"; anything ambiguous is reported as a FAILURE.
 #
-#   Phase 2 (a tunnel exists): the workstation has egress, and ONLY through the
-#   tunnel -- verified by Mullvad's own exit check, a DNS-leak test, an IPv6
-#   test, and an active kill-switch test that drops the tunnel and watches the
-#   WAN NIC directly.
+# Both phases assert NEGATIVES, so this is proof that these specific vectors
+# are closed -- not proof of anonymity.
 #
-# THE RULE THIS FILE IS BUILT AROUND: silence is never scored as security. Every
-# probe must be able to say "I ran and the answer was no" separately from "I did
-# not run". An ssh hop that fails, a tool that is missing, a cached DNS answer or
-# a traffic generator that emits nothing all produce the same quiet output as a
-# perfectly closed gateway -- and each one of those has, at some point during
-# development, turned this suite green while something was actually open. So:
-# probes return explicit tokens, captures carry their own liveness proof, and
-# anything ambiguous is reported as a FAILURE, never as a pass.
-#
-# Both phases assert NEGATIVES. "No egress" can only ever be tested against the
-# vectors below, so this is not proof of anonymity -- it is proof that these
-# specific vectors are closed.
-#
-# Nothing here needs a package installed in a guest: probes use bash's /dev/tcp,
-# ping, and python3, all of which both images already ship (cloud-init is
-# Python). The workstation deliberately has no curl and no dig. The gateway needs
-# tcpdump, which the gateway role installs for exactly this reason.
+# No packages are needed in the guests: probes use bash's /dev/tcp, ping and
+# python3, which both images ship. The gateway needs tcpdump, which its role
+# installs for exactly this reason.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# Sourced for MULLVAD_PIN_FILE, so the pin's location is defined in exactly one
-# place. Spelling the path out a second time here would mean a rename in
-# mullvad-lib.sh silently switches the exit-country assertion below off: the
-# `[[ -f ]]` goes false, nothing prints, and this suite stays green on a tunnel
-# exiting anywhere in Mullvad's network. The file is pure functions and
-# constants -- sourcing it runs nothing.
+# Sourced for MULLVAD_PIN_FILE and mullvad_spec_matches, so the pin's location
+# and the matching rule live in exactly one place. Pure functions; sourcing
+# runs nothing.
 source "$(dirname "${BASH_SOURCE[0]}")/mullvad-lib.sh"
 load_config
-# .env is read for ONE fact: which mechanism built this lab. Without it this
-# script cannot tell a MULLVAD_EXIT build (where the pin is authoritative) from
-# a MULLVAD_WG_CONFIG build (where a leftover pin is meaningless), and would
-# either skip the country check in silence or fail a correct lab for exiting
-# somewhere the operator never asked for. load_env is a no-op if .env is absent,
-# and although it exports what it sources, no ssh invocation here sets SendEnv
-# or SetEnv, so nothing from .env can reach a guest.
+# .env is read for one fact: which mechanism built this lab (MULLVAD_EXIT vs
+# MULLVAD_WG_CONFIG), which decides whether the exit-country assertion applies.
 load_env
 
 # Resolve the gateway's host port and the internal-only VMs from the fleet, the
-# same way ssh.sh does, so a reordered or renamed fleet does not silently verify
-# the wrong box.
+# same way ssh.sh does, so a reordered fleet does not verify the wrong box.
 idx=0; gw_idx=0; internal_rows=""
 for entry in "${LAB_VMS[@]}"; do
   idx=$((idx + 1))
@@ -74,14 +50,10 @@ jump=(-o "ProxyCommand=$(ssh_jump_proxycommand "$gw_port")" "${ssh_common[@]}")
 fails=0
 note_fail() { printf '%s%s%s %s\n' "$(_c '1;31')" "FAIL" "$(_c 0)" "$*" >&2; fails=$((fails + 1)); }
 
-# on_ws <ip> <command...>: run a command on an internal-only VM through the jump.
-# on_gw <command...>:      run a command on the gateway over its host port forward.
-#
-# `-n` on both is load-bearing, not tidiness. Without it ssh inherits the caller's
-# stdin, and the per-VM loop below is fed by a here-string: the first ssh drains
-# it, the next `read` hits EOF, and every internal VM after the first is silently
-# never verified. The suite then reports all checks passed on a fleet it only
-# partly looked at.
+# on_ws <ip> <command...>: run a command on an internal-only VM via the jump.
+# on_gw <command...>:      run a command on the gateway over its host forward.
+# `-n` is load-bearing: without it ssh drains the here-string feeding the
+# per-VM loop, and every VM after the first is silently never verified.
 on_ws() {
   local ip="$1"; shift
   ssh -n "${jump[@]}" "${LAB_USER}@${ip}" "$@"
@@ -91,14 +63,9 @@ on_gw() {
   ssh -n "${ssh_common[@]}" -p "$gw_port" "${LAB_USER}@127.0.0.1" "$@"
 }
 
-# --- probes that cannot be confused with a broken transport ------------------
-#
-# ssh returns 255 when the hop itself fails (a ProxyCommand race, a
-# ConnectTimeout under load, sshd's MaxStartups) -- and non-zero is exactly what
-# a blocked probe returns too. Testing `if on_ws ...` therefore scores a failed
-# connection as "the packet was blocked": a green kill-switch result for a check
-# that never ran. These helpers make the guest say which happened, so the
-# ambiguous case is distinguishable and can be failed loudly.
+# ssh returns 255 when the hop itself fails -- the same non-zero a blocked
+# probe returns. These helpers make the guest say which happened, so a failed
+# connection is never scored as "the packet was blocked".
 ws_probe() {
   local ip="$1" cmd="$2"
   on_ws "$ip" "if ${cmd}; then echo REACHED; else echo BLOCKED; fi" 2>/dev/null | tr -d '\r' || true
@@ -126,30 +93,20 @@ expect_reached() {
   esac
 }
 
-# py_on_ws <ip> <program>: run a python3 program on an internal VM.
-#
-# Base64 because the program travels through ssh's remote shell as well as the
-# local one. Quoting a multi-line program through two shells reliably produces a
-# syntax error rather than an answer, and a probe that errors out looks exactly
-# like a probe that was correctly blocked.
+# py_on_ws <ip> <program>: run a python3 program on an internal VM. Base64,
+# because quoting a multi-line program through two shells reliably produces a
+# syntax error that looks exactly like a correctly blocked probe.
 py_on_ws() {
   local ip="$1" src="$2" b64
   b64="$(printf '%s' "$src" | base64 | tr -d '\n')"
   on_ws "$ip" "python3 -c \"import base64;exec(base64.b64decode('${b64}'))\""
 }
 
-# vpn_pkg_status <dump> <package>: prints the db:Status-Status field dpkg-query
-# reported for <package> in a "Package Status\n"-per-line <dump>, or empty if
-# <package> never appears in it. Matched by exact field equality, never a
-# substring or pattern, so one package name can never be spoofed by another.
-#
-# Where the dump holds MORE THAN ONE record for the same name -- dpkg emits one
-# per architecture, and keeps a not-installed stanza for every package it has
-# ever known -- the record that counts as PRESENT wins, and the last record
-# decides only when no record does. Keeping "whichever sorted last" instead
-# (`$1 == p { s = $2 }`) resolves an ambiguous input toward "pass": a trailing
-# not-installed stanza masks a genuinely installed one and the host is reported
-# clean. That is the opposite of what this function is for.
+# vpn_pkg_status <dump> <package>: the db:Status-Status field for <package> in
+# a "Package Status" per-line dump, or empty if absent. Exact field equality,
+# never a substring. Where dpkg holds several records for one name (one per
+# arch, plus not-installed stanzas), a PRESENT record wins over a trailing
+# not-installed one -- resolving ambiguity toward "pass" would defeat the check.
 vpn_pkg_status() {
   awk -v p="$2" '
     $1 == p {
@@ -160,63 +117,29 @@ vpn_pkg_status() {
   ' <<<"$1"
 }
 
-# vpn_pkg_present <dump> <package>: true if <package>'s status is anything
-# OTHER than not-installed or config-files -- i.e. something of it landed on
-# disk, whatever mid-install or purge-adjacent state it is otherwise sitting
-# in. Inverted rather than matching "installed" literally: a package
-# interrupted mid-install sits in `unpacked` or `half-configured` with its
-# files already there, and a filter that only recognizes the one steady-state
-# string would wave that straight through. A status nobody here has thought to
-# enumerate therefore fails safe (counts as present) instead of passing.
+# vpn_pkg_present <dump> <package>: true if anything of <package> is on disk.
+# Inverted rather than matching "installed": a package interrupted mid-install
+# (unpacked, half-configured) must fail safe by counting as present.
 vpn_pkg_present() {
   local s
   s="$(vpn_pkg_status "$1" "$2")"
   [[ -n "$s" && "$s" != "not-installed" && "$s" != "config-files" ]]
 }
 
-# pkg_fully_installed <dump> <package>: true ONLY if <package>'s status is the
-# single steady-state string "installed". The opposite polarity from
-# vpn_pkg_present on purpose: there, "present" means bad and any non-absent
-# status (unpacked, half-configured, ...) must fail safe by counting as
-# present. Here, "installed" means good, and those same partial states are
-# exactly what an apt run that died halfway through the tunnel leaves behind --
-# so accepting anything short of "installed" would fail OPEN, printing green
-# over a tool group that only half-landed. Used to assert a requested Kali
-# tool group actually finished installing, never to scan for a VPN client.
+# pkg_fully_installed <dump> <package>: true ONLY for the steady-state
+# "installed". Opposite polarity from vpn_pkg_present on purpose: here the
+# partial states are what a died-mid-tunnel apt run leaves behind, and
+# accepting them would print green over a half-landed tool group.
 pkg_fully_installed() {
   [[ "$(vpn_pkg_status "$1" "$2")" == "installed" ]]
 }
 
-# vpn_nm_plugins <dump>: prints every INSTALLED network-manager-* package in
-# <dump> that is not one of the three the desktop legitimately needs.
-#
-# This is the open-ended half of the VPN-client check, and the reason its green
-# message is allowed to say "no VPN client" rather than "none of the fourteen I
-# know about". A hand-written list can only ever name the plugins that existed
-# when it was written: a plugin a future Kali adds to the desktop's Recommends,
-# or one the operator apt-installs from the desktop's own terminal, is neither
-# purged by the role nor named here -- and the whole enumeration would then keep
-# printing green over a working OpenVPN GUI. Every NetworkManager VPN plugin is
-# named network-manager-<protocol>[-gnome] by Debian policy, so the pattern
-# catches the ones nobody has thought of yet.
-#
-# `network-manager` itself does not match (no trailing dash). Four packages are
-# excluded, all of them pulled in by kali-desktop-xfce and none able to dial a
-# VPN, because a front-end without a plugin has no protocol to speak:
-#
-#   -applet, -gnome  the tray icon and the GTK connection editor
-#   -tui             nmtui, the curses front-end
-#   -l10n            translations; no executable code at all
-#
-# The first cold build after this check was widened found -l10n and -tui and
-# failed on them. They are excluded rather than purged: they are not VPN
-# clients, and purging translations to satisfy a leak check would be theatre.
-#
-# Anything else that matches is reported. Keeping the net broad and extending
-# this exclusion list when a false positive appears is deliberate: a new
-# exclusion is a one-line change made with the package name in front of you,
-# whereas a missed plugin prints green over a working VPN GUI. Failing loudly on
-# a harmless package is the cheap direction to be wrong in.
+# vpn_nm_plugins <dump>: every INSTALLED network-manager-* package that is not
+# one of the four the desktop legitimately needs (applet/gnome front-ends,
+# nmtui, translations -- none can dial a VPN). The pattern is the open-ended
+# half of the VPN check: it catches plugins no hand-written list can know
+# about, and failing loudly on a harmless new package is the cheap direction
+# to be wrong in.
 vpn_nm_plugins() {
   awk '$1 ~ /^network-manager-/ \
        && $1 != "network-manager-applet" && $1 != "network-manager-gnome" \
@@ -225,18 +148,11 @@ vpn_nm_plugins() {
     | sort -u || true
 }
 
-# dns_udp_probe <resolver> [qname] [timeout]
-#
-# Sends a real DNS query over UDP and prints the response code, or TIMEOUT.
-#
-# UDP, because a `</dev/tcp/<resolver>/53` test covers TCP only and DNS is
-# overwhelmingly UDP: the leak that matters most would sail straight past it. A
-# UDP socket cannot be tested by connecting either -- connect() on UDP always
-# "succeeds" -- so this sends a real query and reads a real answer.
-#
-# The response code, not merely "did something reply", because a resolver that
-# cannot reach its upstream still REPLIES: with SERVFAIL. Treating any reply as
-# success would score a completely severed resolver as working.
+# dns_udp_probe <resolver> [qname] [timeout]: send a real DNS query over UDP
+# and print the response code, or TIMEOUT. UDP because a /dev/tcp test covers
+# TCP only, and a real query because connect() on UDP always "succeeds". The
+# response code matters: a resolver cut off from its upstream still replies,
+# with SERVFAIL.
 dns_udp_probe() {
   cat <<PY
 import socket, struct, sys
@@ -268,26 +184,16 @@ except Exception as e:
 PY
 }
 
-# A name no cache can have seen before. Any DNS check that must distinguish
-# "resolution works" from "resolution is severed" needs one: unbound on the
-# gateway and systemd-resolved on the workstation both cache, so re-asking for a
-# name an earlier check just warmed returns instantly from cache and looks
-# exactly like a live resolver. (It did: the kill-switch DNS check reported a
-# leak that was nothing but a cache hit.)
+# A name no cache can have seen: unbound and systemd-resolved both cache, and
+# a cache hit looks exactly like a live resolver.
 uncached_name() {
   printf 'v%s%s.example.com' "$RANDOM" "$RANDOM"
 }
 
 # --- phase detection ---------------------------------------------------------
-#
-# sudo is required: /etc/wireguard is 0700 root, so an unprivileged `test -f`
-# cannot even traverse it and reports "no tunnel" on a fully configured gateway.
-#
-# And the three outcomes are kept distinct. A bare `if on_gw "sudo test -f ..."`
-# treats a broken sudo, a failed ssh and a genuinely absent config identically:
-# it quietly drops to the Phase 1 contract, which a Phase 2 gateway whose tunnel
-# is DEAD passes with flying colours -- ending in "all checks passed. The
-# workstation is provably isolated." on a lab with no working anonymity layer.
+# sudo is required (/etc/wireguard is 0700 root), and the three outcomes stay
+# distinct: silently dropping to the Phase 1 contract on a broken hop would
+# pass a Phase 2 gateway whose tunnel is dead.
 phase_probe="$(on_gw "sudo -n true >/dev/null 2>&1 || { echo NOSUDO; exit 0; }
 if sudo -n test -f /etc/wireguard/wg0.conf; then echo TUNNEL; else echo NOTUNNEL; fi" 2>/dev/null | tr -d '\r' || true)"
 case "$phase_probe" in
@@ -304,24 +210,20 @@ case "$phase_probe" in
 esac
 
 if [[ "$PHASE" == "2" ]]; then
-  # `|| true` on every capture in this script is not sloppiness: lib.sh sets
-  # `set -euo pipefail`, which this file inherits, so an unguarded `x="$(cmd)"`
-  # aborts the whole run the moment cmd returns non-zero -- and several of the
-  # commands below return non-zero in the PASSING case (`timeout` exits 124 when
-  # the WAN stays silent). Failures are handled explicitly instead.
+  # `|| true` on captures throughout: lib.sh sets `set -euo pipefail`, and
+  # several commands below return non-zero in the PASSING case.
   #
-  # The WAN NIC must come from the MAIN routing table. `ip route get` and
-  # ansible_default_ipv4 both return wg0 once the tunnel is up, because wg-quick
-  # installs policy routing rules that outrank the main table -- and a WAN-silence
-  # check pointed at wg0 would watch the tunnel instead of the wire.
+  # The WAN NIC must come from the MAIN routing table: `ip route get` returns
+  # wg0 once the tunnel's policy routing is up, and a WAN-silence check pointed
+  # at wg0 would watch the tunnel instead of the wire.
   wan_if="$(on_gw "ip -4 route show table main default | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1" 2>/dev/null | tr -d '\r' || true)"
   [[ -n "$wan_if" ]] || die "could not determine the gateway's WAN interface; refusing to report a clean WAN"
 
   wan_addr="$(on_gw "ip -4 -o addr show dev ${wan_if} | awk '{print \$4}' | cut -d/ -f1 | head -1" 2>/dev/null | tr -d '\r' || true)"
   [[ -n "$wan_addr" ]] || die "could not determine the gateway's WAN address; refusing to report a clean WAN"
 
-  # The internal NIC, found by the address it carries rather than by name, is
-  # where the kill-switch test confirms its own traffic generator is working.
+  # The internal NIC, found by the address it carries, is where the kill-switch
+  # test confirms its own traffic generator is working.
   internal_if="$(on_gw "ip -4 -o addr show to ${gw_ip}/32 | awk '{print \$2}' | head -1" 2>/dev/null | tr -d '\r' || true)"
   [[ -n "$internal_if" ]] || die "could not determine the gateway's internal interface (no NIC holds ${gw_ip})"
 
@@ -331,17 +233,10 @@ if [[ "$PHASE" == "2" ]]; then
   [[ -n "$endpoint_ip" && -n "$endpoint_port" ]] \
     || die "could not read the WireGuard endpoint from the gateway; refusing to report a clean WAN"
 
-  # What is allowed to appear on the WAN, and nothing else:
-  #   - ARP, which is link-local and carries nothing.
-  #   - management SSH, scoped to tcp AND to this NIC's own address, so a leak
-  #     that merely happens to involve port 22 elsewhere is still caught.
-  #   - the single WireGuard endpoint.
-  #
-  # Exclusion, never inclusion. Filtering FOR the workstation's address is a false
-  # pass: the source of a leaked packet is not something this test may assume. A
-  # stale NAT binding makes it the gateway's SNATed tunnel address (seen while
-  # building Task 4); with the binding gone it is a bare 10.20.0.10 (seen by
-  # deliberately opening the forward path to prove this check fires at all).
+  # What may appear on the WAN and nothing else: ARP, management SSH (scoped to
+  # tcp AND this NIC's own address), and the single WireGuard endpoint.
+  # Exclusion, never inclusion: the source of a leaked packet is not something
+  # this test may assume (SNATed or bare 10.20.0.10, both were seen).
   wan_filter="not arp and not (tcp port 22 and host ${wan_addr}) and not (host ${endpoint_ip} and udp port ${endpoint_port})"
   wan_cap_file="/tmp/anon-egress-wan-capture"
 
@@ -349,25 +244,18 @@ if [[ "$PHASE" == "2" ]]; then
 fi
 
 # --- WAN capture -------------------------------------------------------------
-#
-# Watching the WAN NIC is the only authoritative answer to "did a packet leave in
-# the clear". Asking the guest whether it got a reply is NOT equivalent, and the
-# difference is not academic: a forward-chain regression sends the workstation's
-# packets out the WAN un-SNATed, with source 10.20.0.10, for which SLIRP has no
-# return path -- so no reply ever comes back, the guest's probe fails, and a
-# reply-based check calls that "blocked" while traffic is leaving the machine.
-#
-# Runs in the background so a whole block of probes can be judged by one capture.
-# -l keeps tcpdump line-buffered; without it output to a pipe or file is block
-# buffered and a leak of a few packets can sit in the buffer, unflushed, until
-# after the capture is read -- silently becoming a clean result.
+# Watching the WAN NIC is the only authoritative answer to "did a packet leave
+# in the clear": a leaked packet can leave un-SNATed, get no reply, and look
+# "blocked" to every guest-side probe. Runs in the background so one capture
+# judges a whole block of probes. -l keeps tcpdump line-buffered, so a
+# few-packet leak cannot sit unflushed in a buffer and read as clean.
 wan_capture_start() {
   local started
   started="$(on_gw "sudo rm -f ${wan_cap_file} 2>/dev/null
 sudo nohup timeout 120 tcpdump -nnl -i ${wan_if} -Q out '${wan_filter}' >${wan_cap_file} 2>/dev/null </dev/null &
 sleep 2
 if pgrep -x tcpdump >/dev/null 2>&1; then echo STARTED; else echo NOTSTARTED; fi" 2>/dev/null | tr -d '\r' || true)"
-  # A capture that never started would report a beautifully clean WAN. Say so.
+  # A capture that never started would report a beautifully clean WAN.
   [[ "$started" == "STARTED" ]] || { note_fail "could not start the WAN capture on ${wan_if} (${started:-no response}); WAN silence CANNOT be asserted"; return 1; }
   return 0
 }
@@ -395,9 +283,8 @@ while read -r short role vm_idx; do
     "${short} cannot reach the gateway at ${gw_ip}" \
     "gateway-reachability"
 
-  # 2. Topology: exactly one non-loopback NIC. A second NIC appearing here means
-  # someone gave this VM a NAT interface, which breaks the entire guarantee even
-  # if every other check happens to pass at this moment. True in both phases.
+  # 2. Topology: exactly one non-loopback NIC. A second NIC means someone gave
+  # this VM a NAT interface, which breaks the entire guarantee.
   nics="$(on_ws "$ip" "ls /sys/class/net | grep -v '^lo$' | tr '\n' ' '" 2>/dev/null || true)"
   count="$(printf '%s' "$nics" | wc -w | tr -d ' ')"
   if [[ "$count" == "1" ]]; then
@@ -406,69 +293,15 @@ while read -r short role vm_idx; do
     note_fail "${short} has ${count} NICs (${nics% }); an internal-only VM must have exactly one"
   fi
 
-  # 3. No VPN client, of any kind, on an internal-only host.
+  # 3. No VPN client of any kind on an internal-only host: the machine-checkable
+  # form of "credentials live only on the gateway". A client sitting installed
+  # and unconfigured leaks nothing today, so no network probe can see it.
   #
-  # This is the machine-checkable form of "credentials live only on the gateway".
-  # Nothing else in this suite can see it: a VPN client sitting installed and
-  # unconfigured leaks nothing today, so every network probe stays green while the
-  # box acquires exactly the capability the design forbids.
-  #
-  # It guards two real drift paths. The Mullvad repo added for the browser also
-  # carries `mullvad-vpn` for arm64 (an apt pin blocks it, and this catches the
-  # pin being removed). And the Kali desktop RECOMMENDS a set of NetworkManager
-  # VPN plugins, which are purged at install time -- but a later dist-upgrade can
-  # re-satisfy a Recommends and quietly put an OpenVPN GUI back on the machine
-  # months after anyone last looked.
-  #
-  # The named list below is NOT the whole check, and must not be: it is a closed
-  # enumeration, while the message printed on success ("no VPN client installed")
-  # is an open-ended claim. vpn_nm_plugins closes that gap for the plugins by
-  # matching network-manager-* as a pattern; the standalone clients at the end of
-  # the list close the other obvious route, which is that this host now has a
-  # desktop, a terminal and full apt access through the tunnel, so `apt install
-  # openvpn` is one command away from anyone sitting at it.
-  #
-  # The trailing sentinel distinguishes "scanned, found nothing" from "the scan
-  # never ran": an ssh failure prints nothing at all, which would otherwise be
-  # indistinguishable from a clean host and would score as a pass.
-  #
-  # Three independent faults are guarded here, and none of them may be inferred
-  # from either of the others:
-  #   - transport failure (ssh/the jump never delivered the command at all) --
-  #     caught by the `__vpnscan=done` sentinel, unconditional because it is
-  #     written after `;`, not `&&`.
-  #   - dpkg-query never ran (missing binary, unreadable status DB) -- caught
-  #     by requiring `base-files`, present on every Debian/Kali install, to
-  #     show up in the dump with a real status.
-  #   - dpkg-query STARTED but died partway through (crash, OOM, a resource
-  #     limit) -- the pipe still closes cleanly and the unconditional sentinel
-  #     still fires, so neither of the above two faults would catch it.
-  #     `base-files` cannot be pinned to "ran to completion" either by putting
-  #     it first in the argument list: dpkg-query iterates its status database
-  #     in alphabetical order regardless of argv order, so it is always
-  #     emitted early no matter where it is asked for -- argument position is
-  #     not a lever here. This is why the dump below takes NO package
-  #     arguments at all and is filtered locally instead: with nothing named on
-  #     the command line there is nothing that can be "not found", so
-  #     dpkg-query's own exit status becomes meaningful again, captured
-  #     immediately afterwards (nothing piped in between) as `__rc=$?`. Only
-  #     `__rc=0` counts as a completed run.
-  #
-  # Filtering locally, in this shell, rather than through an awk pipeline sent
-  # over ssh also means every NAMED package below is matched by exact field
-  # equality against dpkg's own output -- never a substring -- so one package
-  # name can never be spoofed by another. The single deliberate exception is
-  # vpn_nm_plugins, which is a prefix match by design and errs toward reporting.
-  # This list mirrors the purge list in the workstation role's desktop.yaml, and
-  # the mirroring is the point: the role removes them, this asserts they stayed
-  # removed. The standalone clients matter as much as the plugins -- a
-  # NetworkManager plugin is a GUI in front of a binary that outlives it, and
-  # this guest was measured carrying working openvpn, openconnect, vpnc, pptp
-  # and strongswan binaries with every plugin already gone.
-  #
-  # strongswan is named the way it is actually installed (the daemon packages)
-  # AND as the metapackage, which is not installed today but would be on an image
-  # that pulls it.
+  # The dump takes NO package arguments (so dpkg-query's exit status is
+  # meaningful) and is filtered locally by exact field equality. Three faults
+  # are kept distinct from a clean host: transport failure (the unconditional
+  # `__vpnscan=done` sentinel), dpkg-query never ran (the base-files canary),
+  # and dpkg-query died partway (`__rc` captured immediately after it).
   vpn_watch_list="mullvad-vpn \
       network-manager-openvpn network-manager-openvpn-gnome \
       network-manager-pptp network-manager-pptp-gnome \
@@ -483,22 +316,16 @@ while read -r short role vm_idx; do
 
   vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' 2>/dev/null; echo __rc=\$?; echo __vpnscan=done" \
       2>/dev/null | tr -d '\r' || true)"
-  # The tool-group assertion (3b, below) is nested inside this branch because it
-  # reuses vpn_dump, which only exists once the dump is proven to have run and
-  # to have really read the status database. Every note_fail in this branch's
-  # failure paths is therefore followed by an explicit note, for a workstation,
-  # that the toolset could not be asserted either -- without it, a transport
-  # failure here would print one FAIL for the VPN scan and total silence for
-  # the toolset, and silence must never be scored as security.
+  # The tool-group assertion (3b) reuses this dump, so every failure path here
+  # also notes that the toolset could not be asserted -- silence is never
+  # scored as security.
   if ! grep -q '__vpnscan=done' <<<"$vpn_scan"; then
     note_fail "the VPN-client scan did not run on ${short}; cannot assert credentials are gateway-only"
     [[ "$role" == "workstation" ]] && note_fail "the toolset on ${short} cannot be asserted either: it depends on the same scan"
   else
     vpn_rc="$(sed -n 's/^__rc=\([0-9][0-9]*\)$/\1/p' <<<"$vpn_scan" | tail -1 || true)"
-    # grep -v exits 1, not 0, when every line matches the exclusion (i.e. the
-    # dump has nothing left in it but the two marker lines) -- exactly the
-    # fault case this code exists to handle, so it must not be allowed to trip
-    # `set -e` and abort the whole run.
+    # grep -v exits 1 when every line matches the exclusion -- exactly the
+    # fault case handled below, so it must not trip `set -e`.
     vpn_dump="$(grep -vE '^__rc=[0-9]+$|^__vpnscan=done$' <<<"$vpn_scan" || true)"
     if [[ "$vpn_rc" != "0" ]]; then
       note_fail "the VPN-client scan on ${short} did not complete (dpkg-query exited ${vpn_rc:-unknown} instead of 0); credential-isolation cannot be asserted"
@@ -511,10 +338,8 @@ while read -r short role vm_idx; do
       for pkg in $vpn_watch_list; do
         vpn_pkg_present "$vpn_dump" "$pkg" && vpn_found="${vpn_found}${pkg} "
       done
-      # ...and then the same dump again, by pattern, for the plugins no list can
-      # know about. No extra round trip: the full dump is already here. The
-      # dedupe keeps a package that is both named above and matched here from
-      # being reported twice.
+      # The same dump again, by pattern, for the plugins no list can know
+      # about; deduped against the named finds.
       for pkg in $(vpn_nm_plugins "$vpn_dump"); do
         case " ${vpn_found}" in
           *" ${pkg} "*) continue ;;
@@ -528,34 +353,13 @@ while read -r short role vm_idx; do
         ok "${short} has no VPN client installed: none of the named clients, and no network-manager-* plugin beyond the desktop's own (credentials stay on the gateway)"
       fi
 
-      # 3b. Every tool group KALI_TOOL_GROUPS asked for is actually installed.
-      #
-      # This reuses the dump above rather than making a second round trip, and
-      # that reuse is what makes it trustworthy: the dump has already been
-      # proven to have run (dpkg-query exited 0) and to have really read the
-      # status database (the base-files canary). A fresh query here could come
-      # back empty from a dead connection and read as "nothing installed".
-      #
-      # It exists because an apt run that died halfway through the tunnel leaves
-      # a build that looks entirely successful: Ansible reported ok, the
-      # workstation boots, and the tools are simply absent. Nothing else in this
-      # suite would notice.
+      # 3b. Every tool group KALI_TOOL_GROUPS asked for actually finished
+      # installing. Reuses the proven dump: a fresh query could come back empty
+      # from a dead connection and read as "nothing installed".
       if [[ "$role" == "workstation" ]]; then
-        # parse_tool_groups dies on an invalid selection, and it dies inside
-        # THIS command substitution's subshell. The `if !` is what turns that
-        # into a scored FAIL that the rest of the suite survives.
-        #
-        # Mutation evidence, and it did not do what was predicted: replacing
-        # this with a bare `groups_list="$(parse_tool_groups || true)"` was
-        # expected to print green over an invalid config. Measured under bash
-        # 3.2, it hard-aborts the whole run instead, because `exit` inside a
-        # command substitution kills that subshell before `|| true` on the
-        # outer assignment can ever run. Worse than predicted, not better:
-        # every later check, kill-switch included, is skipped in silence.
-        #
-        # The other mutation, breaking the fact rather than the guard: removing
-        # kali-tools-detect on the guest made `make verify` fail through the
-        # "is missing tool group(s)" branch below and exit non-zero.
+        # parse_tool_groups dies inside this command substitution's subshell;
+        # the `if !` turns that into a scored FAIL the rest of the suite
+        # survives (a bare `|| true` would abort the whole run under bash 3.2).
         if ! groups_list="$(parse_tool_groups)"; then
           note_fail "KALI_TOOL_GROUPS in lab.conf is invalid (see the error above); the toolset on ${short} cannot be asserted"
         else
@@ -578,10 +382,9 @@ while read -r short role vm_idx; do
     fi
   fi
 
-  # 4. Positive controls for the tools the leak checks rely on. A bash built
-  # without /dev/tcp, or a ping that cannot do IPv6, fails a probe in exactly the
-  # same way a blocked packet does -- which would make the corresponding leak
-  # check permanently, silently green.
+  # 4. Positive controls for the tools the leak checks rely on: a bash without
+  # /dev/tcp or a ping without IPv6 fails a probe exactly like a blocked packet,
+  # making the corresponding leak check permanently, silently green.
   expect_reached "$(ws_probe "$ip" "timeout 5 bash -c '</dev/tcp/${gw_ip}/22' >/dev/null 2>&1")" \
     "${short} has working /dev/tcp (the TCP leak probes below are meaningful)" \
     "${short} cannot open /dev/tcp even to the gateway: the TCP leak probes prove nothing" \
@@ -592,8 +395,8 @@ while read -r short role vm_idx; do
     "ping6 control"
 
   if [[ "$PHASE" == "1" ]]; then
-    # 5. Isolation: no path off the segment. ICMP to a public address, then a TCP
-    # connect, because a dropped ping alone would not rule out a working route.
+    # 5. Isolation: ICMP and TCP, because a dropped ping alone would not rule
+    # out a working route.
     expect_blocked "$(ws_probe "$ip" "ping -c1 -W3 1.1.1.1 >/dev/null 2>&1")" \
       "${short} has no ICMP path to the internet (correct for Phase 1)" \
       "LEAK: ${short} reached 1.1.1.1 by ICMP with no VPN or forwarding in place" \
@@ -619,38 +422,25 @@ while read -r short role vm_idx; do
     exit_host="$(sed -n 's/.*"mullvad_exit_ip_hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$exit_json" || true)"
     ok "${short} egresses via a Mullvad exit (${ws_pub_ip}${exit_host:+, ${exit_host}})"
     # >>> exit-country assertion (extracted verbatim by tests/mullvad-select.sh) >>>
-    # Egressing via SOME Mullvad exit is not the claim the operator cares about:
-    # they chose a country. Without this, a build could exit anywhere in
-    # Mullvad's network and every check would still be green -- intent and
-    # observation would never be compared.
-    #
-    # WHICH MECHANISM BUILT THE LAB decides whether the comparison applies at
-    # all, and only .env says which. The pin outlives an .env edit -- only `make
-    # destroy` clears it -- and the two mechanisms are mutually exclusive, so
-    # switching from MULLVAD_EXIT to MULLVAD_WG_CONFIG is a normal thing to do
-    # and leaves a stale pin behind. Applied blindly, that pin fails a perfectly
-    # correct lab while naming a country the operator never asked for.
+    # Egressing via SOME Mullvad exit is not the claim: the operator chose a
+    # country, and intent and observation must be compared. Which mechanism
+    # built the lab decides whether the comparison applies, and only .env says
+    # which -- a stale pin left over after switching to MULLVAD_WG_CONFIG must
+    # not fail a correct lab.
     if [[ -n "${MULLVAD_EXIT:-}" ]]; then
       pinned_exit=""
       if [[ -f "$MULLVAD_PIN_FILE" ]]; then
-        # NR==1 matches how mullvad_resolve_pair reads the pin back (`read -r
-        # entry exit_h < "$pin"`): first line, second field.
+        # NR==1 matches how mullvad_resolve_pair reads the pin back.
         pinned_exit="$(awk 'NR==1{print $2}' "$MULLVAD_PIN_FILE" 2>/dev/null || true)"
       fi
       if [[ -z "$pinned_exit" ]]; then
-        # Not a skip. MULLVAD_EXIT names a country the operator asked for, and
-        # with no readable pin nothing here can confirm they got it. A missing,
-        # empty, truncated or hand-restored pin all land here, and "could not
-        # tell" is a failure in this file, never a quiet pass.
+        # Not a skip: with no readable pin nothing can confirm the operator got
+        # the country they asked for, and "could not tell" is a failure here.
         note_fail "MULLVAD_EXIT='${MULLVAD_EXIT}' asked for a specific exit, but no hostname could be read from ${MULLVAD_PIN_FILE}: nothing can confirm ${short} egresses where you chose"
       elif ! mullvad_spec_matches "$MULLVAD_EXIT" "$pinned_exit"; then
-        # The pin records what was selected, not what .env asks for now, and
-        # nothing here re-resolves: the pin is rewritten by `make up` /
-        # `make configure`, never by this script. So "edit MULLVAD_EXIT, then
-        # run make verify to see where I am" compares the tunnel against the
-        # PREVIOUS choice and would otherwise print ok for a lab that is not in
-        # the country .env names. Same dash-boundary rule the selection used,
-        # from the same function, so the two cannot drift.
+        # The pin records what was SELECTED, not what .env asks for now; only
+        # `make up` / `make configure` rewrite it. Same dash-boundary rule the
+        # selection used, from the same function, so the two cannot drift.
         note_fail "MULLVAD_EXIT='${MULLVAD_EXIT}' but ${MULLVAD_PIN_FILE} pins ${pinned_exit}, and ${short} is on ${exit_host:-an exit whose hostname could not be read}: .env was edited after this lab was built. Run 'make configure' (or 'make up') so the selection catches up before trusting this check"
       elif [[ -z "$exit_host" ]]; then
         note_fail "${short} egresses via Mullvad but the exit hostname could not be read, so it cannot be compared with the pinned exit ${pinned_exit}"
@@ -660,10 +450,8 @@ while read -r short role vm_idx; do
         note_fail "${short} egresses via ${exit_host} but ${pinned_exit} was selected: the tunnel is not in the country you chose"
       fi
     else
-      # Said out loud rather than skipped in silence. An assertion that does not
-      # apply and an assertion that was switched off produce the same empty
-      # transcript, and this file's whole rule is that those two must never be
-      # indistinguishable.
+      # Said out loud rather than skipped in silence: "does not apply" and
+      # "switched off" must never be indistinguishable.
       log "Exit-country assertion does not apply to ${short}: this lab is built from MULLVAD_WG_CONFIG, so no country was selected to compare against (any ${MULLVAD_PIN_FILE} left over from an earlier lab is ignored)"
     fi
     # <<< exit-country assertion <<<
@@ -671,31 +459,47 @@ while read -r short role vm_idx; do
     note_fail "${short} is NOT exiting via Mullvad. Response: ${exit_json:-<none>}"
   fi
 
-  # Secondary and deliberately non-fatal: this host is out of scope and may be
-  # behind its own VPN, which would make an equality test noisy, not meaningful.
+  # Secondary and non-fatal: the host is out of scope and may be behind its
+  # own VPN.
   host_pub_ip="$(python3 -c "import urllib.request;print(urllib.request.urlopen('https://am.i.mullvad.net/json',timeout=20).read().decode())" 2>/dev/null \
                  | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
   if [[ -n "$ws_pub_ip" && -n "$host_pub_ip" && "$ws_pub_ip" == "$host_pub_ip" ]]; then
     warn "${short} and this host report the same public IP (${ws_pub_ip}). Expected if the host is on the same VPN; investigate if not."
   fi
 
-  # DNS must work via the gateway's unbound, and NOT via any external resolver.
-  # The name is a fresh random one: `getent hosts example.com` would be answered
-  # from the workstation's own stub cache and would report a working resolver
-  # over a completely dead gateway.
-  up_rcode="$(py_on_ws "$ip" "$(dns_udp_probe "$gw_ip" "$(uncached_name)" 10)" 2>/dev/null | tr -d '\r' || true)"
+  # DNS must work via the gateway's unbound and NOT via any external resolver.
+  # A fresh random name every attempt, because a cached answer reads as a
+  # working resolver over a completely dead gateway.
+  #
+  # Retried because this is a POSITIVE control, like the flow_up loop below.
+  # NEVER retry a leak assertion: "failed three times, call it blocked" is how
+  # an intermittent leak gets scored as security.
+  up_rcode=""; up_tries=0
+  for _ in 1 2 3; do
+    up_tries=$((up_tries + 1))
+    up_rcode="$(py_on_ws "$ip" "$(dns_udp_probe "$gw_ip" "$(uncached_name)" 10)" 2>/dev/null | tr -d '\r' || true)"
+    case "$up_rcode" in
+      NOERROR|NXDOMAIN) break ;;
+    esac
+    sleep 2
+  done
   case "$up_rcode" in
-    NOERROR|NXDOMAIN) ok "${short} resolves DNS through the gateway (uncached lookup, ${up_rcode})" ;;
-    "")               note_fail "the DNS probe against ${gw_ip} did not run on ${short}; status UNKNOWN" ;;
-    *)                note_fail "${short} cannot resolve via ${gw_ip}: an uncached lookup returned ${up_rcode}" ;;
+    NOERROR|NXDOMAIN)
+      if [[ "$up_tries" -eq 1 ]]; then
+        ok "${short} resolves DNS through the gateway (uncached lookup, ${up_rcode})"
+      else
+        # Said out loud: it worked, but it did not work first time, and that is
+        # worth knowing before it degrades into a hard failure.
+        warn "${short} resolves DNS through the gateway (uncached lookup, ${up_rcode}), but only on attempt ${up_tries} of 3: the resolver is answering slowly or intermittently"
+      fi ;;
+    "") note_fail "the DNS probe against ${gw_ip} did not run on ${short} in ${up_tries} attempts; status UNKNOWN" ;;
+    *)  note_fail "${short} cannot resolve via ${gw_ip}: ${up_tries} uncached lookups returned ${up_rcode}" ;;
   esac
 
   dns_leak=0
   for resolver in 1.1.1.1 8.8.8.8; do
     rcode="$(py_on_ws "$ip" "$(dns_udp_probe "$resolver")" 2>/dev/null | tr -d '\r' || true)"
     if [[ -z "$rcode" ]]; then
-      # Not a pass. A probe that failed to run produces the same silence as a
-      # blocked one, and silence must never be scored as security.
       note_fail "could not run the UDP DNS probe against ${resolver} on ${short}; leak status UNKNOWN"
       dns_leak=1
     elif [[ "$rcode" != "TIMEOUT" ]]; then
@@ -711,8 +515,8 @@ while read -r short role vm_idx; do
   done
   [[ "$dns_leak" -eq 0 ]] && ok "${short} cannot reach an external resolver on UDP or TCP :53"
 
-  # IPv6 must be dead, not tunnelled. `ping -6` rather than `ping6`, which is a
-  # compatibility symlink that not every image still ships.
+  # IPv6 must be dead, not tunnelled. `ping -6`, because the ping6 symlink is
+  # not on every image.
   expect_blocked "$(ws_probe "$ip" "ping -6 -c1 -W3 2606:4700:4700::1111 >/dev/null 2>&1")" \
     "${short} has no IPv6 egress" \
     "IPv6 LEAK: ${short} reached a v6 address" \
@@ -725,33 +529,27 @@ if [[ "$PHASE" == "2" ]]; then
   echo
   log "Kill-switch test on ${ks_short} (${ks_ip})"
 
-  # Restoration is a trap, not a final line: if an assertion below exits, or the
-  # operator interrupts, the tunnel must still come back. A verify run that
-  # leaves the lab without egress is worse than one that fails.
+  # Restoration is a trap, not a final line: whatever aborts this section, the
+  # tunnel must come back. A verify run that leaves the lab without egress is
+  # worse than one that fails.
   tunnel_restored=0
   restore_tunnel() {
     if [[ "$tunnel_restored" == "1" ]]; then return 0; fi
     log "Restoring the tunnel"
     on_gw "sudo pkill -x tcpdump >/dev/null 2>&1 || true; sudo rm -f ${wan_cap_file} 2>/dev/null || true" >/dev/null 2>&1 || true
     on_ws "$ks_ip" "pkill -x ping >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
-    # Do not swallow a failed restart: an operator who is told "Restoring the
-    # tunnel" and nothing else will assume the lab is usable again.
     if ! on_gw "sudo systemctl start wg-quick@wg0" >/dev/null 2>&1; then
       warn "could not restart wg-quick@wg0; the lab may be left without egress. Run: make ssh gateway, then sudo systemctl start wg-quick@wg0"
     fi
   }
-  # INT/TERM/HUP must EXIT after restoring. A bare handler returns and bash
-  # resumes the script -- straight into the tunnel-down assertions with the
-  # tunnel back up, reporting leaks that are nothing but the interrupt.
+  # INT/TERM/HUP must EXIT after restoring: a bare handler would resume into
+  # the tunnel-down assertions with the tunnel back up.
   trap restore_tunnel EXIT
   trap 'restore_tunnel; exit 130' INT TERM HUP
 
   # --- part 1: nothing NEW may escape while the tunnel is down ---------------
-  #
-  # Judged by the WAN NIC as well as by the guests' own results. The guests can
-  # only report whether a reply came back, and the un-SNATed leak described above
-  # produces no reply at all -- so on its own that evidence is compatible with
-  # traffic pouring out the WAN.
+  # Judged by the WAN NIC as well as the guests: an un-SNATed leak produces no
+  # reply, so guest-side evidence alone is compatible with traffic pouring out.
   wan_watching=0
   wan_capture_start && wan_watching=1
 
@@ -767,11 +565,8 @@ if [[ "$PHASE" == "2" ]]; then
     "KILL-SWITCH FAILED: TCP escaped with the tunnel down" \
     "kill-switch TCP"
 
-  # Ask the gateway's own resolver for a name nothing can have cached, and read
-  # the response code. With the tunnel down unbound cannot reach its upstream, so
-  # the only honest answers are SERVFAIL or silence; anything resolvable means a
-  # clear-net DNS path exists. Timeout is generous because unbound retries its
-  # upstream a few times before giving up.
+  # With the tunnel down unbound cannot reach its upstream, so the only honest
+  # answers are SERVFAIL or silence. Generous timeout: unbound retries first.
   ks_rcode="$(py_on_ws "$ks_ip" "$(dns_udp_probe "$gw_ip" "$(uncached_name)" 12)" 2>/dev/null | tr -d '\r' || true)"
   case "$ks_rcode" in
     SERVFAIL|TIMEOUT|REFUSED)
@@ -782,8 +577,7 @@ if [[ "$PHASE" == "2" ]]; then
       note_fail "KILL-SWITCH FAILED: DNS still resolved with the tunnel down (${ks_rcode} for an uncached name)" ;;
   esac
 
-  # The gateway itself must be just as closed. It is the host holding the
-  # credentials, so a clear-net path here is the more valuable one to an attacker.
+  # The gateway itself must be just as closed: it holds the credentials.
   expect_blocked "$(gw_probe "timeout 5 bash -c '</dev/tcp/1.1.1.1/443' >/dev/null 2>&1")" \
     "kill-switch: the gateway has no clear-net egress either" \
     "KILL-SWITCH FAILED: the gateway itself reached the internet with the tunnel down" \
@@ -800,17 +594,12 @@ if [[ "$PHASE" == "2" ]]; then
   fi
 
   # --- part 2: nor may an ALREADY ESTABLISHED flow ---------------------------
-  #
-  # This is the case a naive kill-switch test misses, and the reason this section
-  # exists. conntrack keys on the IP 5-tuple, NOT on the output interface, so a
-  # flow established through the tunnel stays ESTABLISHED for days after the
-  # tunnel goes away; an unqualified `ct state established accept` then re-admits
-  # it on the clear-net NIC. Only opening NEW connections after tunnel-down passes
-  # cleanly while that hole is wide open -- this repo shipped exactly that bug and
-  # part 1 above did not notice.
-  #
-  # So: bring the tunnel back, establish a flow through it, drop the tunnel
-  # underneath the flow, and watch the WAN NIC itself.
+  # The case a naive kill-switch test misses: conntrack keys on the 5-tuple,
+  # not the output interface, so a flow established through the tunnel stays
+  # ESTABLISHED for days after the tunnel dies, and an unqualified
+  # `ct state established accept` re-admits it on the clear-net NIC. So: bring
+  # the tunnel back, establish a flow through it, drop the tunnel underneath
+  # it, and watch the WAN NIC itself.
   log "kill-switch: checking an ESTABLISHED flow cannot survive the tunnel dropping"
   on_gw "sudo systemctl start wg-quick@wg0" >/dev/null 2>&1 || true
 
@@ -825,36 +614,23 @@ if [[ "$PHASE" == "2" ]]; then
   if [[ "$flow_up" != "1" ]]; then
     note_fail "could not re-establish egress, so the established-flow leak test could not run"
   else
-    # Generate the flow with ping, NOT a TCP connection. The obvious approach --
-    # open a socket to 1.1.1.1:443 and keep writing to it -- silently does not
-    # work: the peer resets the malformed TLS after a handful of packets and every
-    # later send raises BrokenPipeError. Measured on this lab: 5 sends, then
-    # broken pipe. The flow then emits nothing at all, the WAN is silent for the
-    # most boring possible reason, and this test passes without having tested
-    # anything. ping keeps emitting for as long as it is told to, whatever the
-    # peer does, and conntrack tracks an ICMP echo flow as established exactly as
-    # it does a TCP one -- which is all that matters here, because no rule in the
-    # ruleset distinguishes the two.
-    #
-    # -w 60 is a self-destruct: should this script die before the cleanup below,
-    # the ping stops on its own instead of running forever on an isolated VM.
+    # ping, NOT a TCP connection: a raw socket to :443 gets reset after a few
+    # packets and then emits nothing, making the WAN silent for the most boring
+    # possible reason. conntrack tracks an ICMP echo flow as established
+    # exactly like TCP, which is all that matters to the ruleset. -w 60 is a
+    # self-destruct if this script dies before the cleanup.
     on_ws "$ks_ip" "nohup setsid ping -i 0.3 -w 60 -q 1.1.1.1 >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1 || true
     sleep 2
 
     # Prove the generator is generating BEFORE drawing any conclusion from a
-    # silent WAN. Without this the test cannot tell "nothing leaked" from
-    # "nothing was sent" -- and the second one looks identical and always passes.
-    # That is not hypothetical: the TCP generator described above failed exactly
-    # this way, and the WAN check reported silence with a deliberately wide-open
-    # forward rule in place.
+    # silent WAN: "nothing leaked" and "nothing was sent" look identical.
     gen="$(on_gw "sudo timeout 8 tcpdump -nnl -i ${internal_if} -c 1 'icmp and src host ${ks_ip}' 2>/dev/null | wc -l" 2>/dev/null | tr -d ' \r' || true)"
     if [[ "${gen:-0}" == "0" ]]; then
       note_fail "the established-flow generator produced no traffic; a silent WAN would prove nothing"
     else
       if wan_capture_start; then
         on_gw "sudo systemctl stop wg-quick@wg0" >/dev/null 2>&1 || true
-        # Long enough for several retransmits and ~30 ping packets to have had
-        # every opportunity to escape.
+        # Long enough for several retransmits and ~30 pings to try to escape.
         sleep 10
         leaked="$(wan_capture_stop)"
         if [[ -n "$leaked" ]]; then
@@ -865,10 +641,8 @@ if [[ "$PHASE" == "2" ]]; then
         fi
       fi
     fi
-    # Stop the generator. `-x ping` matches the process name exactly; `-f` with a
-    # command-line pattern would also match the remote `bash -c` running it, since
-    # ssh puts the whole command string in that process's argv -- killing the
-    # shell first can leave the ping alive to pollute every later check.
+    # `-x ping` matches the process name exactly; `-f` would also match the
+    # remote `bash -c` and could kill the shell while leaving the ping alive.
     on_ws "$ks_ip" "pkill -x ping >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
   fi
 
@@ -894,9 +668,8 @@ if [[ "$PHASE" == "2" ]]; then
   fi
 
   # --- part 4: fail-closed across a reboot, proved by ordering ---------------
-  # Rebooting the gateway inside verify would be slow and would cut the very SSH
-  # path the rest of this script needs, so assert the ordering that makes a boot
-  # safe instead.
+  # Rebooting inside verify would cut the SSH path this script needs, so assert
+  # the ordering that makes a boot safe instead.
   expect_reached "$(gw_probe "systemctl show wg-quick@wg0 -p After --value | tr ' ' '\n' | grep -qx nftables.service")" \
     "wg-quick is ordered after nftables (fail-closed across a reboot)" \
     "wg-quick is NOT ordered after nftables: a boot could route before the ruleset loads" \
@@ -907,10 +680,8 @@ if [[ "$PHASE" == "2" ]]; then
     "nftables enablement"
 
   # Forwarding must be a consequence of the ruleset being loaded, never a
-  # persistent sysctl: with no ruleset the kernel default is accept, so a
-  # forwarding kernel and no rules is the one combination that leaks everything.
-  # All of systemd's sysctl search paths, not just /etc -- a drop-in under
-  # /usr/lib or /run enables forwarding just as effectively.
+  # persistent sysctl: a forwarding kernel with no rules is the one combination
+  # that leaks everything. All of systemd's sysctl search paths, not just /etc.
   expect_blocked "$(gw_probe "grep -qs '^[[:space:]]*net.ipv4.ip_forward[[:space:]]*=[[:space:]]*1' /etc/sysctl.conf /etc/sysctl.d/*.conf /run/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf /lib/sysctl.d/*.conf")" \
     "ip_forward is not persistently enabled (granted by nftables.service only)" \
     "ip_forward is persistently enabled on disk: a boot with no ruleset would forward in the clear" \

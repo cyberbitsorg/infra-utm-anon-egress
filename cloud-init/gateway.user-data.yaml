@@ -1,32 +1,23 @@
 #cloud-config
-# Gateway bootstrap = the default base plus IPv4 forwarding.
+# Gateway bootstrap = default.user-data.yaml plus the forwarding sysctl.
+# Self-contained because cloud-init does not merge templates; keep the body in
+# sync with cloud-init/default.user-data.yaml.
 #
-# make-seed.sh selects a SINGLE template per role and cloud-init does not merge
-# two user-data files, so this file is self-contained: it repeats the body of
-# cloud-init/default.user-data.yaml and appends its own write_files/runcmd items.
-# Keep it in sync with that file.
-#
-# Forwarding is OFF at first boot on purpose (Task 4b): the gateway role's
-# nftables.service drop-in is the only thing that turns it on, via
-# ExecStartPost, once the kill-switch ruleset has actually loaded. If
-# forwarding defaulted to on here, a failed nftables.service would leave the
-# kernel with no ruleset at all -- default accept -- and the workstation's
-# traffic would route straight out the WAN in the clear.
+# Forwarding is OFF here on purpose. The gateway role's nftables.service
+# drop-in is the only thing that turns it on, via ExecStartPost, once the
+# kill-switch ruleset has actually loaded -- a failed nftables.service must not
+# leave a forwarding kernel with no rules at all.
 
 hostname: "@@HOSTNAME@@"
 preserve_hostname: false
 
 users:
   - name: "@@LAB_USER@@"
-    # no_user_group passes --no-user-group to useradd, so it does not try to
-    # create a group named after the user. Without it, any LAB_USER that
-    # happens to match an existing group fails the whole users_groups module:
-    # Debian and Kali ship legacy system groups (operator is GID 37, and staff,
-    # games, users and more exist too), and useradd then exits 9 with "group
-    # <name> exists". The user is never created, the key never lands, and
-    # every SSH login fails with "Permission denied (publickey)" while the VM
-    # otherwise boots fine. The user's primary group becomes the useradd
-    # default (users); sudo comes from the groups list below.
+    # no_user_group (--no-user-group) stops useradd creating a group named
+    # after the user. Without it, a LAB_USER matching an existing system group
+    # (operator, staff, games, users ...) fails the whole users_groups module:
+    # the user is never created, the key never lands, and every SSH login fails
+    # with "Permission denied (publickey)" while the VM otherwise boots fine.
     no_user_group: true
     groups: [sudo]
     shell: /bin/bash
@@ -39,13 +30,8 @@ ssh_pwauth: false
 disable_root: true
 
 write_files:
-  # Disable periodic apt in this hands-off setup. Without it,
-  # apt-daily-upgrade runs unattended-upgrades in the background and restarts
-  # openssh; a restart can orphan the running sshd, which keeps holding :22 and
-  # blocks ssh.socket from rebinding ("Address already in use"). ssh.service
-  # then fails its dependency, /run/sshd is never recreated, and every new
-  # connection is closed before the banner. Ansible manages packages here, so
-  # nothing needs the periodic timers.
+  # Disable periodic apt: apt-daily-upgrade restarting openssh can orphan the
+  # running sshd, which then holds :22 and blocks ssh.socket from rebinding.
   - path: /etc/apt/apt.conf.d/99lab-no-periodic
     content: |
       APT::Periodic::Update-Package-Lists "0";
@@ -53,15 +39,12 @@ write_files:
       APT::Periodic::Unattended-Upgrade "0";
       APT::Periodic::AutocleanInterval "0";
 
-  # Route the workstation segment. Phase 2 puts the VPN tunnel and the
-  # fail-closed nftables ruleset on top; this only makes the kernel willing to
-  # forward at all.
   - path: /etc/sysctl.d/99-gateway-forward.conf
     content: |
       # Forwarding is OFF by default and switched on by nftables.service only
-      # after the kill-switch ruleset has actually loaded (see the gateway role).
-      # If the ruleset ever fails to load, the kernel has no rules at all --
-      # default accept -- so forwarding must not already be enabled.
+      # after the kill-switch ruleset has actually loaded (see the gateway
+      # role). With no ruleset the kernel default is accept, so forwarding must
+      # not already be enabled.
       net.ipv4.ip_forward=0
 
 package_update: true
@@ -71,12 +54,7 @@ packages:
 
 runcmd:
   - [systemctl, enable, --now, qemu-guest-agent]
-  # Pre-create Ansible's remote temp dir. Every play in the playbook runs with
-  # become: true, so Ansible operates as root and its remote_tmp resolves to
-  # /root/.ansible/tmp. If that dir is missing, Ansible creates it on the first
-  # module and prints "Module remote_tmp ... did not exist and was created with
-  # a mode of 0700". Creating it here (root-owned, 0700 -- exactly what Ansible
-  # wants) makes it already exist, so the warning never appears.
+  # Pre-create Ansible's remote temp dir to suppress its first-module warning.
   - [install, -d, -m, "0700", -o, root, -g, root, /root/.ansible/tmp]
   - [sysctl, --system]
 

@@ -44,8 +44,7 @@ else
   ok "Generated ${local_priv} and ${local_priv}.pub"
 fi
 
-# Secrets. Same treatment as the SSH key: generate what is missing rather than
-# make the operator hand-roll it, and never touch what already exists.
+# Generate what is missing, never touch what exists.
 log "Checking secrets: ${ENV_FILE}"
 if [[ -f "$ENV_FILE" ]]; then
   # Only the mode is enforced here; contents are the operator's business.
@@ -57,13 +56,11 @@ if [[ -f "$ENV_FILE" ]]; then
 else
   [[ -f "${REPO_ROOT}/.env.example" ]] || die ".env.example is missing; cannot create .env"
   warn ".env missing, generating it with fresh console passwords"
-  # Create it 0600 BEFORE writing anything, so the secrets are never briefly
-  # world-readable on disk.
+  # 0600 before any secret is written, so it is never briefly world-readable.
   ( umask 077; : > "$ENV_FILE" )
   chmod 600 "$ENV_FILE"
-  # Substitute a generated password into each empty *_CONSOLE_PASSWORD="" line and
-  # copy the rest of the example (comments included) verbatim, so the generated
-  # file still documents itself. A fresh password per line, not one reused.
+  # Copy the example verbatim, substituting a fresh password per empty
+  # *_CONSOLE_PASSWORD="" line.
   while IFS= read -r line; do
     case "$line" in
       GATEWAY_CONSOLE_PASSWORD=\"\"|WORKSTATION_CONSOLE_PASSWORD=\"\")
@@ -76,13 +73,12 @@ else
   log "Read them with: grep CONSOLE_PASSWORD .env"
 fi
 
-# Validate the WireGuard config early. Finding out it is malformed here costs
-# seconds; finding out after the ruleset is installed costs a debugging session
-# with no egress.
+# Validate the WireGuard config early: a malformed one found here costs
+# seconds, found after the ruleset is installed it costs a debugging session.
 load_env
 
-# Exactly one of the two mechanisms. A precedence rule would be worse than an
-# error: the entire point of this feature is knowing which exit you are on.
+# Exactly one of the two mechanisms; a precedence rule would hide which exit
+# you are actually on.
 if [[ -n "${MULLVAD_WG_CONFIG:-}" && -n "${MULLVAD_EXIT:-}" ]]; then
   die "Both MULLVAD_WG_CONFIG and MULLVAD_EXIT are set in .env. They are mutually exclusive: clear one. MULLVAD_EXIT assembles a multihop config for you; MULLVAD_WG_CONFIG uses a file you assembled yourself."
 fi
@@ -94,11 +90,8 @@ if [[ -n "${MULLVAD_EXIT:-}" ]]; then
             "$MULLVAD_EXIT" "${MULLVAD_ENTRY:-}" "$MULLVAD_PIN_FILE")" \
     || die "Could not resolve an exit (reason above). Fix .env or secrets/ before 'make up'."
   entry_host="${pair%% *}"; exit_host="${pair##* }"
-  # NOT re-asserted here: every return path out of mullvad_resolve_pair --
-  # fresh pick or reused pin -- already runs through mullvad_assert_multihop
-  # itself (mullvad_pair_ok calls it for a reused pin; the fresh-pick path
-  # calls it directly before writing the pin). A second call here can never
-  # fire its die and only costs three more python3 spawns per preflight.
+  # Multihop is not re-asserted here: every path out of mullvad_resolve_pair
+  # already ran mullvad_assert_multihop.
   wg_derived="$(mktemp)"
   trap 'rm -f "${wg_derived:-}"' EXIT
   mullvad_render_to "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \
@@ -128,9 +121,8 @@ else
 fi
 
 log "Checking Kali tool groups"
-# parse_tool_groups dies on an invalid name, which is the point of doing this
-# here: a bad group name should stop the build before a VM is created, not
-# thirty minutes later inside an apt run over the tunnel.
+# parse_tool_groups dies on an invalid name: stop before a VM exists, not
+# mid-apt over the tunnel.
 tool_groups="$(parse_tool_groups)"
 if [[ -n "$tool_groups" ]]; then
   ok "Tool groups: $(printf '%s' "$tool_groups" | tr '\n' ' ')"
@@ -138,16 +130,11 @@ else
   ok "No Kali tool groups selected: the workstation gets the desktop and browser only"
 fi
 
-# The internal segment rides an Apple vmnet host-only switch whose OWN subnet is
-# assigned by macOS (com.apple.vmnet.plist, Host_Net_Address), independent of
-# LAB_SEGMENT. If that subnet overlaps a route the host already has -- most
-# painfully a VPN whose tunnel gateway lands inside it -- macOS binds that route
-# to UTM's bridge instead of the tunnel, so the VM switch silently swallows the
-# VPN's traffic. (This bit us once: a VPN gateway 192.168.128.1 fell inside the
-# vmnet default 192.168.128.0/24 and the 10.x routes vanished into bridge100.)
-# HOST_ONLY_SUBNET declares the range the operator set the plist to; refuse to
-# build while it collides, and flag drift between the plist and this declaration.
-host_only="${HOST_ONLY_SUBNET:-172.16.20.0/24}"
+# The vmnet host-only switch's own subnet is assigned by macOS, not by this
+# repo. If a live route's gateway (typically a VPN's) falls inside it, macOS
+# binds that route to UTM's bridge and the VPN silently breaks -- so refuse to
+# build while that is the case. See README "Host-only subnet".
+host_only="${HOST_ONLY_SUBNET:-192.168.128.0/24}"
 log "Checking host-only subnet ${host_only} for route collisions"
 collision=""
 while read -r dest gw; do
@@ -155,12 +142,11 @@ while read -r dest gw; do
 done < <(netstat -rn -f inet 2>/dev/null \
            | awk 'NR>1 && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1, $2}')
 if [[ -n "$collision" ]]; then
-  die "Host-only subnet ${host_only} collides: ${collision} sits inside it, so UTM's vmnet bridge would hijack that traffic (typically a VPN). Move HOST_ONLY_SUBNET and the macOS Host_Net_Address off this range -- see README 'Host-only subnet'."
+  die "Host-only subnet ${host_only} collides: ${collision} sits inside it, so UTM's vmnet bridge would hijack that traffic. That is almost always a VPN that is currently up. Disconnect it and re-run: the bridge and the tunnel must never be up on the same range at once. (If the collision is not a VPN, the range itself is wrong -- see README 'Host-only subnet'.)"
 fi
 
-# Drift: a live vmnet host bridge already up on a subnet that ISN'T the declared
-# one means the plist and lab.conf disagree -- the next VM start would bring the
-# bridge up on the stale range. Warn rather than die: no build is in flight yet.
+# Warn (not die) if a live vmnet bridge is up on a subnet other than the
+# declared one: macOS and lab.conf disagree.
 for brif in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep '^bridge'); do
   ifconfig "$brif" 2>/dev/null | grep -q 'member: vmenet' || continue
   braddr="$(ifconfig "$brif" 2>/dev/null | awk '/inet /{print $2; exit}')"

@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
-# WireGuard config parsing for the Mullvad multihop config the operator generates.
-# Sourced, not run. Pure functions: they read a file and print to stdout, so they
-# are unit testable (tests/wg-config.sh) without an account.
+# WireGuard config parsing and sanitising. Sourced, not run; pure functions,
+# unit tested by tests/wg-config.sh.
 #
-# These functions are a gate, not a convenience. The nftables output chain allows
-# exactly one destination -- the endpoint parsed here -- so a misparse produces a
-# ruleset that looks correct and a tunnel that never comes up.
+# These functions are a gate, not a convenience: the nftables output chain
+# allows exactly one destination -- the endpoint parsed here -- so a misparse
+# produces a ruleset that looks correct and a tunnel that never comes up.
 
 # Print the value of a bare `Key = Value` line, first match wins. Tolerates any
-# spacing around '=' because operators hand-edit these files. Also strips a
-# trailing `# comment` (and the whitespace before it): wg-quick tolerates those,
-# and without this an `Endpoint = 1.2.3.4:3004 # note` line hands the comment to
-# wg_endpoint_port as part of the port, which then fails "not numeric" on an
-# otherwise-valid config.
+# spacing around '=' and strips a trailing `# comment` (wg-quick tolerates
+# those, and a comment glued to the port would fail "not numeric").
 _wg_field() {
   local file="${1:?config path required}" key="${2:?key required}" val
   val="$(sed -n -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p" "$file" | head -1)"
@@ -22,11 +18,8 @@ _wg_field() {
 }
 
 # Print a comma-separated Address/AllowedIPs value with every IPv6 entry
-# removed, regardless of position (first, middle, last, or the only entry), and
-# with no leading/trailing/doubled comma left behind. An entry is IPv6 iff it
-# contains a ':' -- IPv4 literals and CIDR suffixes never do, so this needs no
-# address-family parsing. Bash 3.2 compatible: plain word-splitting, no arrays
-# needed beyond what `read -ra` gives us.
+# removed, in any position, with no stray commas left behind. An entry is IPv6
+# iff it contains ':'.
 _wg_strip_v6_csv() {
   local csv="${1:-}" IFS=',' parts p out=""
   read -ra parts <<<"$csv"
@@ -40,8 +33,8 @@ _wg_strip_v6_csv() {
   printf '%s' "$out"
 }
 
-# Endpoint host portion. For a Mullvad multihop config this is the ENTRY server's
-# IP, while the port selects the EXIT server.
+# Endpoint host portion. In a Mullvad multihop config this is the ENTRY
+# server's IP, while the port selects the EXIT.
 wg_endpoint_ip() {
   local ep; ep="$(_wg_field "${1:?}" Endpoint)"
   [[ -n "$ep" ]] || return 0
@@ -54,17 +47,14 @@ wg_endpoint_port() {
   printf '%s' "${ep##*:}"
 }
 
-# Return 0 if the config can drive this design, else print ONE specific reason to
-# stderr and return 1. Specific messages matter: this runs in preflight, and
-# "invalid config" would send the operator back to a website with no clue why.
+# Return 0 if the config can drive this design, else print ONE specific reason
+# to stderr and return 1. This runs in preflight; "invalid config" would send
+# the operator back to a website with no clue why.
 validate_wg_config() {
   local file="${1:?config path required}" ip port addr allowed peers
   [[ -f "$file" ]] || { echo "WireGuard config not found: ${file}" >&2; return 1; }
-  # Exactly one [Peer]. The whole design rests on there being ONE endpoint: the
-  # nftables output chain allows a single ip/port pair, and every helper here
-  # takes the first match. A second peer would be configured by wg-quick and then
-  # silently blackholed by the ruleset -- fails closed, but presents as "the
-  # tunnel just does not work" with nothing pointing at the cause.
+  # Exactly one [Peer]: the kill-switch allows a single endpoint, so a second
+  # peer would be configured by wg-quick and silently blackholed.
   peers="$(grep -c -i '^[[:space:]]*\[Peer\]' "$file" || true)"
   [[ "${peers:-0}" -eq 1 ]] \
     || { echo "${file}: found ${peers:-0} [Peer] sections, expected exactly 1. This design allows one endpoint through the kill-switch; extra peers would be blocked." >&2; return 1; }
@@ -75,9 +65,7 @@ validate_wg_config() {
   addr="$(_wg_field "$file" Address)"
   [[ -n "$addr" ]] \
     || { echo "${file}: no Address for the interface." >&2; return 1; }
-  # Phase 2 drops IPv6 outright (sanitize_wg_config strips it). If Address is
-  # IPv6-only, stripping would leave the interface with no address at all --
-  # catch that here with a specific reason rather than let wg-quick fail later.
+  # Sanitising strips IPv6; an IPv6-only Address would leave no address at all.
   [[ -n "$(_wg_strip_v6_csv "$addr")" ]] \
     || { echo "${file}: Address '${addr}' is IPv6-only; Phase 2 drops IPv6 and no IPv4 address would remain." >&2; return 1; }
   allowed="$(_wg_field "$file" AllowedIPs)"
@@ -91,43 +79,26 @@ validate_wg_config() {
     || { echo "${file}: no Endpoint = <host>:<port> line." >&2; return 1; }
   [[ "$port" =~ ^[0-9]+$ ]] \
     || { echo "${file}: endpoint port '${port}' is not numeric." >&2; return 1; }
-  # A bracketed host is an IPv6 endpoint. Caught separately so the operator gets
-  # the actual reason: the generic message below says "not a hostname", which is
-  # simply untrue of `[2a03::1]:3225` and sends them looking for the wrong problem.
+  # A bracketed host is an IPv6 endpoint; caught separately so the operator
+  # gets the actual reason rather than "not a hostname".
   [[ "$ip" == \[* ]] \
     && { echo "${file}: endpoint '${ip}' is IPv6. This design drops IPv6 outright; pick a server by its IPv4 address on Mullvad's servers page." >&2; return 1; }
-  # An IPv4 literal only. A hostname would have to be resolved over clear-net DNS
-  # before the tunnel exists -- a leak by construction, and a chicken-and-egg
-  # dependency (design §2). Mullvad's generator emits IPs.
+  # An IPv4 literal only: a hostname would need clear-net DNS before the
+  # tunnel exists, a leak by construction.
   [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || { echo "${file}: endpoint '${ip}' must be an IPv4 address, not a hostname. Use the IP shown on Mullvad's servers page." >&2; return 1; }
   return 0
 }
 
 # Print the config with the modifications this design requires:
-#   - the `DNS =` line removed, so wg-quick does not touch resolv.conf; unbound
-#     owns DNS and wg-quick fighting it would break the gateway's resolution.
-#   - the `MTU =` line removed, so the Ansible role's wg_mtu default is the
-#     ONLY place that sets it. wg-quick applies the LAST assignment of a given
-#     key it sees in the file, so leaving the operator's MTU line in place
-#     would let it silently outrank the value the gateway role writes below
-#     `[Interface]` -- the role would report success while the tunnel actually
-#     ran at whatever MTU Mullvad's generator happened to emit.
-#   - `PostUp`/`PostDown`/`PreUp`/`PreDown` lines removed, so wg-quick never
-#     manages firewalling either: nftables owns egress, and Mullvad's "local
-#     network sharing" option injects exactly these hooks with rules that would
-#     fight our ruleset.
-#   - IPv6 removed from Address and AllowedIPs, in ANY position (first, middle,
-#     last, or the only entry), because IPv6 is dropped outright (design §3.4)
-#     and carrying a v6 address or default route into the tunnel is pure leak
-#     surface for a repo that needs no v6.
-#
-# Address/AllowedIPs are rebuilt entry-by-entry via _wg_strip_v6_csv rather than
-# pattern-deleted in place: a regex anchored on "comma before the v6 token"
-# (the original approach here) silently does nothing when the v6 entry is
-# first, since there is no leading comma to match. Splitting on commas and
-# rejoining only the survivors also guarantees no stray leading/trailing/double
-# comma, whatever position the v6 entry was in.
+#   - `DNS =` removed: unbound owns DNS, wg-quick must not touch resolv.conf.
+#   - `MTU =` removed: the gateway role's wg_mtu is the ONLY place that sets it
+#     (wg-quick applies the LAST assignment it sees, so an operator MTU line
+#     would silently outrank the role's).
+#   - PostUp/PostDown/PreUp/PreDown removed: nftables owns firewalling, and
+#     Mullvad's "local network sharing" option injects exactly these hooks.
+#   - IPv6 stripped from Address/AllowedIPs, entry by entry (a regex anchored
+#     on a leading comma misses a v6 entry in first position).
 sanitize_wg_config() {
   local file="${1:?config path required}" line key val stripped
   while IFS= read -r line || [[ -n "$line" ]]; do

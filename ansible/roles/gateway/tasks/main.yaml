@@ -1,10 +1,8 @@
 ---
-# The gateway is the whole anonymity layer. This file is the running order, and
-# the order is load-bearing: wireguard.yaml derives the interface facts that the
-# ruleset consumes, nftables.yaml closes the box, and dns.yaml then bridges DNS
-# through the tunnel it just became the only path for. See the includes below.
-#
-# The marker file exists so 'make up' proves Ansible actually reached this host.
+# The gateway is the whole anonymity layer, and the include order below is
+# load-bearing: wireguard.yaml derives the interface facts the ruleset
+# consumes, nftables.yaml closes the box, dns.yaml then bridges DNS through the
+# tunnel it just became the only path for.
 - name: Mark gateway provisioned
   ansible.builtin.copy:
     dest: /etc/anon-egress-role
@@ -14,14 +12,10 @@
     mode: "0644"
 
 - name: Install tcpdump on the gateway
-  # scripts/verify.sh proves the kill-switch by watching the WAN NIC itself --
-  # the only place that can answer "did a packet actually leave in the clear".
-  # Without tcpdump that check cannot run, and a leak test that quietly degrades
-  # to "not tested" is the most dangerous kind of green.
-  #
-  # Installed here, early and ungated, so it is present in Phase 1 too: apt still
-  # has the cloud-init bootstrap resolver at this point, before the kill-switch
-  # ruleset cuts DNS off the WAN. Gateway only -- the workstation stays bare.
+  # scripts/verify.sh proves the kill-switch by watching the WAN NIC itself.
+  # Without tcpdump that check quietly degrades to "not tested", which is the
+  # most dangerous kind of green. Installed early and ungated, while apt still
+  # has the cloud-init bootstrap resolver. Gateway only.
   ansible.builtin.apt:
     name: tcpdump
     state: present
@@ -29,16 +23,11 @@
     cache_valid_time: 3600
 
 - name: Keep persistent IPv4 forwarding OFF (nftables switches it on)
-  # Deliberately 0, and deliberately not applied here. Forwarding is granted by
-  # nftables.service's ExecStartPost once the kill-switch ruleset has actually
-  # loaded, and withdrawn by its ExecStopPost. If this file asserted 1, a failed
-  # nftables.service would leave the kernel with no ruleset at all -- default
-  # accept -- while still forwarding the workstation's traffic straight out the
-  # WAN in the clear. The absence of rules is the danger, so the absence of rules
-  # must also mean the absence of forwarding.
-  #
-  # sysctl_set/reload are false so this only writes the boot default; the live
-  # value belongs to nftables.service and must not be stomped mid-run.
+  # Forwarding is granted by nftables.service's ExecStartPost once the ruleset
+  # has actually loaded, and withdrawn by ExecStopPost. A failed nftables plus
+  # a forwarding kernel is the one state that leaks everything, so the absence
+  # of rules must also mean the absence of forwarding. sysctl_set/reload are
+  # false: this writes the boot default only, never the live value.
   ansible.posix.sysctl:
     name: net.ipv4.ip_forward
     value: "0"
@@ -48,18 +37,12 @@
     reload: false
 
 - name: Set the gateway's console password
-  # cloud-init locks the user's password, so without this the UTM console can
-  # show boot output but not accept a login. Set on the guest so we do not depend
-  # on the control node's crypt/passlib; chpasswd also unlocks the account.
-  # Console/GUI only -- SSH stays key-only (ssh_pwauth: false).
-  #
-  # Comes from GATEWAY_CONSOLE_PASSWORD in .env via a 0600 vars file (see
-  # render_secret_vars in scripts/lib.sh). Unset means "leave it locked", which is
-  # why the group_vars default is an empty string rather than a value.
+  # cloud-init locks the account; chpasswd on the guest unlocks it without
+  # needing crypt/passlib on the control node. Console/GUI only -- SSH stays
+  # key-only. Unset means "leave it locked".
   ansible.builtin.shell:
-    # pipefail, under bash rather than dash: without it a failing `echo` (a full
-    # disk, a closed stdout) would be masked by chpasswd's exit status and the
-    # task would report success over an account that still has no password.
+    # pipefail under bash: without it a failing `echo` is masked by chpasswd's
+    # exit status and the task reports success over an unset password.
     cmd: "set -o pipefail; echo '{{ ansible_user }}:{{ gateway_console_password }}' | chpasswd"
     executable: /bin/bash
   changed_when: false
@@ -67,29 +50,25 @@
   when: (gateway_console_password | default('')) | length > 0
 
 # Everything below needs a tunnel. With no sanitised config the gateway stays
-# exactly as Phase 1 left it and the workstation keeps zero egress -- a safe
-# state. Gated on mullvad_wg_sanitized (the file the role actually reads), not
-# mullvad_wg_config (the operator's original path, which no task here touches).
+# as Phase 1 left it and the workstation keeps zero egress -- a safe state.
+# Gated on mullvad_wg_sanitized (the file the role reads), not on
+# mullvad_wg_config (the operator's path, which no task here touches).
 - name: Configure the anonymity layer
   ansible.builtin.include_tasks: wireguard.yaml
   when: mullvad_wg_sanitized | default('') | length > 0
   tags: [vpn, wireguard]
 
 # MUST come after the wireguard include: the ruleset template consumes the
-# anon_wan_if / anon_internal_if facts set there. Gated on the same condition --
-# a kill-switch whose only permitted egress is an endpoint that was never
-# configured would close the gateway with no way back out.
+# anon_wan_if / anon_internal_if facts set there.
 - name: Configure the kill-switch
   ansible.builtin.include_tasks: nftables.yaml
   when: mullvad_wg_sanitized | default('') | length > 0
   tags: [vpn, nftables, killswitch]
 
-# MUST come after the nftables include, for two reasons. `apt install unbound`
-# needs DNS, and the only resolver that survives the ruleset is the in-tunnel
-# bridge that include writes. And unbound's answers reach the workstation only
-# because the input chain accepts :53 on the internal NIC. Same gate as above: a
-# resolver that can only forward through a tunnel is useless without one, and
-# pointing the gateway's resolv.conf at it would break DNS outright.
+# MUST come after the nftables include: `apt install unbound` needs DNS, and
+# the only resolver that survives the ruleset is the in-tunnel bridge that
+# include writes. unbound's answers also reach the workstation only because
+# the input chain accepts :53 on the internal NIC.
 - name: Configure tunnel-only DNS
   ansible.builtin.include_tasks: dns.yaml
   when: mullvad_wg_sanitized | default('') | length > 0

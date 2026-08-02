@@ -44,6 +44,7 @@ want 'role_gateway'                          "gateway role group exists"
 want 'role_workstation'                      "workstation role group exists"
 want 'internal_ip: 10\.20\.0\.1$'            "gateway internal_ip host var"
 want 'ansible_user: anon'                    "connects as LAB_USER"
+want 'ansible_ssh_private_key_file: .*id_ed25519_anon$' "key path comes from LAB_SSH_KEY"
 
 # The workstation must never be given a host port forward: port 0 is 'none', and
 # emitting it as an ansible_port would make Ansible dial 127.0.0.1:0.
