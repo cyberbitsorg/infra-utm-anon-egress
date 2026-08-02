@@ -10,6 +10,12 @@ cloud-init/*.rendered.yaml
 # Ansible inventory generated from running VMs
 ansible/inventory/hosts.generated.yaml
 
+# ansible-lint's project-local runtime home (`make lint` recreates it). It holds
+# only empty collections/modules/roles directories today, which git cannot track
+# anyway, but it is the directory ansible-lint installs collections into when it
+# needs them: one `git add -A` away from vendoring a few thousand files.
+.ansible/
+
 # Secrets and local config. The .example files ARE tracked; the real ones never
 # are. Belt and braces on .env: ignore every .env* variant, then re-include the
 # example, so a .env.local or .env.bak cannot be committed by accident either.
