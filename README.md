@@ -558,8 +558,9 @@ independently, both that no VPN client is installed and that every configured
 group is.
 
 Everything is downloaded through the multihop tunnel, never over the real IP.
-That is the reason it is slow: a group is 300 to 650 packages (the per-group
-sizes are listed in `lab.conf.example`). Installing `top10` and `web`, 301 and
+That is the reason it is slow: a group is 2 to 650 packages, and 300 to 650
+for the general-purpose groups (the per-group sizes are listed in
+`lab.conf.example`). Installing `top10` and `web`, 301 and
 609 new packages respectively, with `make configure` against an
 already-provisioned workstation was measured on 2026-07-31 at **4m 5s**
 wall-clock (`time`'s own line:
@@ -704,7 +705,9 @@ run, and a genuinely closed gateway all produce the same silence.
 So when you add or change a guard: delete it, run the covering test, and confirm
 the test fails **through the assertion that names that behaviour**, not through
 an unrelated crash. Then put it back. It costs a minute and it is the only thing
-that distinguishes a test that runs from a test that bites.
+that distinguishes a test that runs from a test that bites. Record the
+evidence with the change: `docs/mutation-evidence.md` is where it lives so it
+survives merge (`.superpowers/` and `docs/superpowers/` are both gitignored).
 
 This is not defensive boilerplate. All of the following shipped looking correct
 during development, and mutation is what exposed each one:
