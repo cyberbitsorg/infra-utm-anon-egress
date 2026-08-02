@@ -17,7 +17,6 @@ cd "$(dirname "$0")/.."
 source scripts/lib.sh
 
 fail=0
-note() { echo "  FAIL $1"; fail=1; }
 check() { [[ "$1" == "$2" ]] || { echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
 # Run a command and check it fails. The if/else keeps the non-zero return --
 # which is the point of half these cases -- from tripping set -e.

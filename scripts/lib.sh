@@ -255,6 +255,14 @@ parse_tool_groups() {
   # disabled so these characters are not silently expanded to directory names
   # before the charset guard rejects them. Save and restore the caller's noglob
   # setting: some callers may rely on globbing being on.
+  #
+  # `local IFS` covers the other half of word splitting: without it, a caller
+  # that has set IFS=, (a CSV parser elsewhere in the same process, for
+  # instance) makes `for g in $raw` split on commas only, so a space-separated
+  # selection like "web passwords" arrives as one token and dies on the whole
+  # string. Scoped to the function body only; the caller's IFS is untouched
+  # once parse_tool_groups returns.
+  local IFS=$' \t\n'
   noglob_was_on=$(set -o | grep -c "^noglob.*on" || true)
   set -f
   # shellcheck disable=SC2086
