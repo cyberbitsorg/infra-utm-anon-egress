@@ -1,5 +1,7 @@
 ---
-timezone: Europe/Amsterdam
+# UTC on purpose: a guest timezone is application-level fingerprint surface on
+# an anonymity workstation, and neutral for everyone else.
+timezone: UTC
 
 # The isolated internal segment, mirrored from lab.conf's LAB_SEGMENT for the
 # templates that need it (unbound's access-control). Kept in sync by hand: it is
