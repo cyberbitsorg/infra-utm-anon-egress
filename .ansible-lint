@@ -1,0 +1,31 @@
+---
+# Two suppressions, both deliberate. Everything else must pass, because
+# `make lint` now fails when ansible-lint fails: a linter whose failures are
+# swallowed reports the same green as a clean tree, which is the one thing this
+# repo refuses to accept anywhere else.
+
+exclude_paths:
+  # Written by scripts/gen-inventory.sh on every build and gitignored. Its long
+  # ProxyCommand line trips yaml[line-length], and reflowing a generated file is
+  # not something a human gets to fix.
+  - ansible/inventory/hosts.generated.yaml
+
+skip_list:
+  # Every register/set_fact in this repo is prefixed `anon_`, not `<role>_`, and
+  # that is on purpose: the prefix says "this lab", so the same fact name means
+  # the same thing whether it was set in the gateway role or the workstation
+  # role, and a fact that later moves between roles does not have to be renamed.
+  # The rule wants a per-role prefix; we want a per-lab one. Enforcing it would
+  # rename 16 facts across four files to satisfy a convention this repo does not
+  # follow.
+  - var-naming[no-role-prefix]
+
+  # The common role writes /etc/motd from a `|+` block scalar, whose entire
+  # point is that trailing newlines are KEPT: the blank lines after the banner
+  # are the gap before the login prompt, not stray whitespace. yamllint sees
+  # blank lines at end of file and fires. Trimming them to satisfy the linter
+  # changes the banner on every host in the fleet, which is fixing the wrong
+  # thing. Suppressed here rather than through a custom .yamllint, because a
+  # custom yamllint config makes ansible-lint print a notice on every run and
+  # this repo treats noisy output as a defect.
+  - yaml[empty-lines]

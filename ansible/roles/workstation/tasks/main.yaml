@@ -107,7 +107,11 @@
   # deliberate decision, not a default. Set workstation_console_password in
   # ansible/group_vars/role_workstation.yaml (or a vault) to enable it.
   ansible.builtin.shell:
-    cmd: "echo '{{ ansible_user }}:{{ workstation_console_password }}' | chpasswd"
+    # pipefail, under bash rather than dash: without it a failing `echo` (a full
+    # disk, a closed stdout) would be masked by chpasswd's exit status and the
+    # task would report success over an account that still has no password.
+    cmd: "set -o pipefail; echo '{{ ansible_user }}:{{ workstation_console_password }}' | chpasswd"
+    executable: /bin/bash
   changed_when: false
   no_log: true
   when: (workstation_console_password | default('')) | length > 0

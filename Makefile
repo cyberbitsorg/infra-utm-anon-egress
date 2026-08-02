@@ -70,4 +70,21 @@ test: ## Run the shell unit tests (no UTM needed)
 
 lint: ## Syntax-check scripts and Ansible
 	@bash -n scripts/*.sh tests/*.sh && echo "shell OK"
-	@command -v ansible-lint >/dev/null && ansible-lint ansible/ || echo "ansible-lint not installed, skipping"
+	@# `cmd && lint || echo skipping` printed "not installed" when ansible-lint
+	@# was installed and FAILING, and exited 0 either way. Two states that must
+	@# never look alike now do not.
+	@#
+	@# ANSIBLE_COLLECTIONS_PATH is derived rather than assumed: ansible-lint ships
+	@# its own ansible-core, which does not see the collections bundled inside a
+	@# Homebrew `ansible` install. Without this it cannot resolve
+	@# community.general.timezone or ansible.posix.sysctl, reports them as unknown
+	@# modules, and stops at the `min` profile -- so every rule above that never
+	@# runs and the tree looks cleaner than it is.
+	@if command -v ansible-lint >/dev/null 2>&1; then \
+		ANSIBLE_COLLECTIONS_PATH="$$(ansible-galaxy collection list 2>/dev/null \
+			| sed -n 's|^# \(.*\)/ansible_collections$$|\1|p' \
+			| grep -v '/_internal$$' | paste -sd: -)" \
+			ansible-lint ansible/; \
+	else \
+		echo "ansible-lint not installed, skipping"; \
+	fi

@@ -105,7 +105,7 @@
   ansible.builtin.set_fact:
     anon_vpn_present: "{{ workstation_vpn_watch_list | intersect(anon_ws_installed.stdout_lines) }}"
 
-- name: Simulate the purge, to see what would go with them
+- name: Simulate the purge, to see what would go with them  # noqa: command-instead-of-module
   ansible.builtin.command:
     cmd: "apt-get -s purge {{ anon_vpn_present | join(' ') }}"
   register: anon_purge_sim

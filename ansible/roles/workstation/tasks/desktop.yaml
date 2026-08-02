@@ -241,6 +241,7 @@
   # symlink and always reports success -- so the read above gates it and keeps
   # `make configure` at changed=0.
   ansible.builtin.command: systemctl set-default graphical.target
+  changed_when: true
   when: anon_default_target.stdout | trim != 'graphical.target'
 
 - name: Start the display manager
