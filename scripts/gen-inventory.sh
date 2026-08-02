@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
 # Generate the Ansible inventory from provisioned VMs.
 # Reads stdin lines: "<short> <role> <name> <ssh_port> <internal_ip> <nic_layout>"
-# Writes ansible/inventory/hosts.generated.yaml
-# Kept compatible with the bash 3.2 that ships with macOS (no associative arrays).
-#
-# Two host shapes, decided by the NIC layout:
-#
-#   dual      the gateway: it has a NAT NIC with a host port forward, so Ansible
-#             connects to 127.0.0.1:<port> and no guest IP discovery is needed.
-#   internal  everything else: no NAT NIC and no port forward, so it is addressed
-#             by its internal IP and reached with a ProxyCommand that hops
-#             through the gateway's forward -- the same path 'make ssh' uses.
-#
-# Because the workstation's connection depends on the gateway being reachable,
-# the gateway play MUST come first in ansible/playbook.yaml.
+# dual (the gateway) connects on 127.0.0.1:<port>; internal is addressed by its
+# internal IP behind a ProxyCommand through the gateway -- which is why the
+# gateway play must come first in ansible/playbook.yaml.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 load_config
@@ -24,13 +14,8 @@ mkdir -p "$(dirname "$INVENTORY_FILE")"
 # Buffer stdin so we can iterate it twice (hosts, then groups).
 rows="$(cat)"
 
-# The jump host for every internal-only VM: the gateway, over its host forward.
-# GATEWAY_PORT is exported by scripts/up.sh (see ssh_port_for in lib.sh). The
-# ProxyCommand itself comes from lib.sh so this and ssh.sh/up.sh/verify.sh can
-# never drift apart -- see the comment on ssh_jump_proxycommand for why the
-# host-key options have to be inside it.
-# The result lands inside a single-quoted YAML scalar with the ProxyCommand
-# double-quoted, so it survives both the YAML and the ssh parser.
+# The ProxyCommand comes from lib.sh so this, ssh.sh, up.sh and verify.sh can
+# never drift apart. GATEWAY_PORT is exported by up.sh.
 gw_port="${GATEWAY_PORT:?GATEWAY_PORT not set: no dual-NIC gateway was provisioned}"
 proxy="$(ssh_jump_proxycommand "$gw_port")"
 
@@ -39,6 +24,7 @@ proxy="$(ssh_jump_proxycommand "$gw_port")"
   echo "all:"
   echo "  vars:"
   echo "    ansible_user: ${LAB_USER}"
+  echo "    ansible_ssh_private_key_file: $(priv_key)"
   echo "    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'"
   echo "  hosts:"
   while read -r short role name port internal_ip nic_layout; do
@@ -48,10 +34,9 @@ proxy="$(ssh_jump_proxycommand "$gw_port")"
       echo "      ansible_host: 127.0.0.1"
       echo "      ansible_port: ${port}"
     else
-      # No ansible_port: this host has no forward, so its port is the plain
-      # guest 22 reached through the jump. The host-level
-      # ansible_ssh_common_args overrides the group-level one entirely, so the
-      # StrictHostKeyChecking options are repeated inside it.
+      # No ansible_port: plain guest 22 through the jump. The host-level
+      # ansible_ssh_common_args replaces the group-level one entirely, so the
+      # host-key options are repeated inside it.
       echo "      ansible_host: ${internal_ip}"
       echo "      ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyCommand=\"${proxy}\"'"
     fi
@@ -61,13 +46,8 @@ proxy="$(ssh_jump_proxycommand "$gw_port")"
   done <<<"$rows"
 
   echo "  children:"
-  # One group per role. The group name is derived from the role, not equal to
-  # it, for two reasons Ansible warns about otherwise: a role containing a
-  # hyphen is not a valid group identifier, and a host and group with the same
-  # name (short name == role, e.g. gateway:gateway) collide. Prefixing 'role_'
-  # and mapping '-' to '_' avoids both. The playbook targets these 'role_*'
-  # groups; --tags still uses the plain role names.
-  # Unique roles, preserving first-seen order.
+  # One 'role_*' group per role: the prefix avoids a host/group name collision
+  # (gateway:gateway) and '-'->'_' keeps the identifier valid for Ansible.
   roles="$(printf '%s\n' "$rows" | awk 'NF{print $2}' | awk '!seen[$0]++')"
   while read -r role; do
     [[ -z "$role" ]] && continue
