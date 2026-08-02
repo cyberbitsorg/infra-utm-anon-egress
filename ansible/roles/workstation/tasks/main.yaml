@@ -1,12 +1,10 @@
 ---
-# Phase 3 is complete here: the console kernel and the console's security
-# posture below, then the desktop and Mullvad Browser in desktop.yaml, then the
-# Kali toolset in tools.yaml.
+# The console kernel and console security posture here, then the desktop and
+# Mullvad Browser in desktop.yaml, then the Kali toolset in tools.yaml.
 #
-# EVERYTHING here that touches the network must stay behind
-# workstation_has_egress: this host reaches a package mirror ONLY because the
-# gateway forwards it into the tunnel. Remove the tunnel and it has no route at
-# all, by design -- so a task that assumes apt works would hang rather than fail.
+# EVERYTHING that touches the network must stay behind workstation_has_egress:
+# this host reaches a mirror ONLY because the gateway forwards it into the
+# tunnel, so a task that assumes apt works would hang rather than fail.
 - name: Mark workstation provisioned
   ansible.builtin.copy:
     dest: /etc/anon-egress-role
@@ -16,21 +14,12 @@
     mode: "0644"
 
 # --- UTM console (needs egress, so it waited for the tunnel) -----------------
-#
-# Kali publishes only the "genericcloud" cloud image, whose
-# linux-image-cloud-arm64 kernel is built with NO DRM drivers: the guest sees
-# UTM's virtio-gpu-pci device but nothing binds to it, so UTM's display view
-# reports "Display output is not active" forever. The gateway dodges this by
-# using Debian's "generic" image instead; Kali has no such variant, so the only
-# fix is to install the standard kernel and boot it.
-#
-# This mirrors the proven implementation in the sibling infra-utm-redteam-lab
-# attacker role, including its two hard-won details (see below). It is also the
-# prerequisite for a desktop: an XFCE greeter needs a framebuffer, so Phase 3's
-# Mullvad Browser work depends on this block having run.
+# Kali publishes only the "genericcloud" image, whose kernel is built with no
+# DRM drivers: nothing binds to UTM's virtio-gpu device and the display stays
+# dead forever. The gateway dodges this with Debian's "generic" image; Kali has
+# no such variant, so the only fix is to install the standard kernel and boot
+# it. It is also the prerequisite for a desktop: a greeter needs a framebuffer.
 - name: Fail clearly if the console kernel is enabled without egress
-  # apt here would otherwise fail deep in a mirror timeout, which reads as a
-  # broken playbook rather than "you enabled this one phase too early".
   ansible.builtin.fail:
     msg: >-
       workstation_console_kernel is enabled but this host cannot reach a package
@@ -53,14 +42,11 @@
   notify: Reboot into the standard kernel
 
 - name: Make grub default to the standard (non-cloud) kernel
-  # Read the real menuentry ids out of the generated grub.cfg rather than
-  # guessing a version or UUID, and pin them with GRUB_DEFAULT=saved: grub sorts
-  # the "cloud" flavour ahead of the plain one at the same version, so without
-  # this the driver-less cloud kernel keeps winning.
-  #
-  # IMPORTANT: the cloud kernel stays installed as a fallback. The sibling lab
-  # found that purging it wedged the boot (grub picked a half-removed entry and
-  # the guest hung). Only grub's default changes here.
+  # Read the real menuentry ids out of grub.cfg rather than guessing a version,
+  # and pin with GRUB_DEFAULT=saved: grub sorts the "cloud" flavour ahead of
+  # the plain one at the same version, so without this the driver-less kernel
+  # keeps winning. The cloud kernel STAYS installed as a fallback -- purging it
+  # wedges the boot.
   ansible.builtin.shell: |
     set -euo pipefail
     update-grub
@@ -82,12 +68,9 @@
     - ansible_distribution == 'Kali'
 
 - name: Remove the Kali image's console auto-login overrides
-  # The genericcloud image ships agetty drop-ins that auto-login root on tty1 and
-  # on the serial console. On a box whose whole point is compartmentalisation, an
-  # unauthenticated root console is not acceptable, so they go. They are not owned
-  # by any dpkg package, so removal is permanent (apt will not put them back).
-  #
-  # This one needs no egress, so it applies from Phase 1 onwards.
+  # The image ships agetty drop-ins that auto-login root on tty1 and the serial
+  # console. An unauthenticated root console is not acceptable here. They are
+  # owned by no package, so removal is permanent. Needs no egress.
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
@@ -97,19 +80,12 @@
   notify: Reload systemd and restart the tty1 getty
 
 - name: Set the workstation's console password
-  # Without this the console is diagnostic only: cloud-init sets lock_passwd, so
-  # the login prompt cannot be passed and a desktop greeter would be unusable.
-  # Set on the guest so we do not depend on the control node's crypt/passlib;
-  # chpasswd also unlocks the account cloud-init locked. Console/GUI only --
-  # SSH stays key-only (ssh_pwauth: false).
-  #
-  # Unset by default: adding a password to an anonymous engagement box is a
-  # deliberate decision, not a default. Set workstation_console_password in
-  # ansible/group_vars/role_workstation.yaml (or a vault) to enable it.
+  # cloud-init locks the account, so without this the console is diagnostic
+  # only and a desktop greeter would be unusable. chpasswd on the guest also
+  # unlocks it. Console/GUI only -- SSH stays key-only.
   ansible.builtin.shell:
-    # pipefail, under bash rather than dash: without it a failing `echo` (a full
-    # disk, a closed stdout) would be masked by chpasswd's exit status and the
-    # task would report success over an account that still has no password.
+    # pipefail under bash: without it a failing `echo` is masked by chpasswd's
+    # exit status and the task reports success over an unset password.
     cmd: "set -o pipefail; echo '{{ ansible_user }}:{{ workstation_console_password }}' | chpasswd"
     executable: /bin/bash
   changed_when: false
@@ -117,32 +93,23 @@
   when: (workstation_console_password | default('')) | length > 0
 
 - name: Apply the pending kernel reboot before the desktop
-  # Handlers are PLAY-scoped: without this they run after the last task in the
-  # play, i.e. after the desktop include below has already finished. But the
-  # desktop's precondition is the RUNNING kernel, not the installed one -- the
-  # cloud kernel has no DRM driver, so on a cold build lightdm would be started
-  # with no framebuffer to open, respawn (Restart=always) until it burned
-  # systemd's start limit, and be left `failed` for the next `make configure` to
-  # trip over on `state: started`.
-  #
-  # No `when:` is possible here (meta tasks do not take one) and none is needed:
-  # with no handler queued -- every incremental run, where the kernel was
-  # installed and rebooted into long ago -- this flushes nothing and costs
-  # nothing.
+  # Handlers are PLAY-scoped, so without this they would run after the desktop
+  # include. But the desktop's precondition is the RUNNING kernel: on a cold
+  # build lightdm would start with no framebuffer, respawn until it burned
+  # systemd's start limit, and be left failed. No `when:` is possible on a meta
+  # task and none is needed: with no handler queued this costs nothing.
   ansible.builtin.meta: flush_handlers
 
-# MUST come after the console-kernel block AND after the flush above: a desktop
-# needs the framebuffer that the standard (non-cloud) kernel provides, and an
-# XFCE greeter has nothing to draw on under the driver-less cloud kernel.
+# MUST come after the console-kernel block AND the flush: an XFCE greeter has
+# nothing to draw on under the driver-less cloud kernel.
 - name: Configure the desktop
   ansible.builtin.include_tasks: desktop.yaml
   when: workstation_desktop | default(false) | bool
   tags: [desktop]
 
-# MUST come after the desktop include: a tool group can pull GUI applications
-# that expect a desktop to register themselves against, and the desktop's own
-# NetworkManager neutralisation must already be in place before several hundred
-# more packages arrive.
+# MUST come after the desktop include: tool groups can pull GUI applications,
+# and the desktop's NetworkManager neutralisation must be in place before
+# several hundred more packages arrive.
 - name: Install the Kali toolset
   ansible.builtin.include_tasks: tools.yaml
   tags: [tools]

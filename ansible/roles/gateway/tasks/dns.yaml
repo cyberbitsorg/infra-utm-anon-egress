@@ -1,8 +1,8 @@
 ---
 - name: Stop cloud-init from rewriting resolv.conf
-  # Must come before anything here writes resolv.conf. A regenerated file pointing
-  # back at SLIRP's 10.0.2.3 would not leak (the ruleset drops :53 on the WAN) but
-  # it would silently break all gateway DNS on the next boot.
+  # A regenerated file pointing back at SLIRP's 10.0.2.3 would not leak (the
+  # ruleset drops :53 on the WAN) but it would break gateway DNS on the next
+  # boot. Must come before anything here writes resolv.conf.
   ansible.builtin.copy:
     dest: /etc/cloud/cloud.cfg.d/99-anon-egress-no-resolv.cfg
     owner: root
@@ -18,26 +18,18 @@
   register: anon_unbound_conf
 
 - name: Bridge DNS through the tunnel until unbound exists
-  # FIRST RUN ONLY. The nftables ruleset has just cut off SLIRP's 10.0.2.3, and
-  # the next task has to `apt install unbound` -- which needs to resolve a mirror.
-  # Mullvad's resolver is reachable inside the tunnel and permitted by
-  # `oifname wg0 accept`, so it bridges the gap without ever leaking a query.
-  #
-  # Guarded on our unbound fragment already existing, because without the guard
-  # this task and "Point the gateway's own resolver at unbound" below overwrite
-  # each other on every single run: both report changed forever and the role never
-  # converges. Once unbound is configured the bridge has done its job and must not
-  # run again.
+  # FIRST RUN ONLY. The ruleset has just cut off SLIRP's 10.0.2.3 and the next
+  # task must resolve a mirror to install unbound. Mullvad's resolver is
+  # reachable inside the tunnel, so this bridges the gap without leaking a
+  # query. Guarded on our unbound fragment existing: without the guard this and
+  # the last task in this file overwrite each other every run and the role
+  # never converges.
   #
   # `follow: false` (the module default, stated because it is load-bearing)
-  # REPLACES the symlink the Debian cloud image ships at /etc/resolv.conf ->
-  # /run/systemd/resolve/resolv.conf with a real file. Were it true, this would
-  # write into systemd-resolved's runtime file, which resolved rewrites and a
-  # reboot discards. systemd's tmpfiles entry for that symlink is `L!`
-  # (create-if-absent, boot-only), so it does not put the symlink back over a
-  # regular file.
+  # REPLACES the image's symlink to systemd-resolved's runtime file with a real
+  # file; writing through the symlink would be discarded on reboot.
   #
-  # With the tunnel down this leaves the gateway with no DNS at all. That is the
+  # With the tunnel down this leaves the gateway with no DNS at all: the
   # fail-closed promise applied consistently, not a defect.
   ansible.builtin.copy:
     dest: /etc/resolv.conf
@@ -47,15 +39,13 @@
     follow: false
     content: |
       # Managed by Ansible (role: gateway).
-      # Bootstrap only: Mullvad's resolver, reachable inside the tunnel. Replaced
-      # by unbound on loopback at the end of this task list.
+      # Bootstrap only: Mullvad's resolver, reachable inside the tunnel.
+      # Replaced by unbound on loopback at the end of this task list.
       nameserver {{ mullvad_dns }}
       options timeout:2 attempts:2
   when: not anon_unbound_conf.stat.exists
 
 - name: Install unbound
-  # Needs working DNS to resolve the mirror -- either the bridge above on a first
-  # run, or unbound itself on every run after that.
   ansible.builtin.apt:
     name: unbound
     state: present
@@ -69,9 +59,8 @@
     owner: root
     group: root
     mode: "0644"
-    # Same reasoning as the nftables ruleset: never install a config the daemon
-    # cannot parse. unbound would keep serving the old one until a restart and
-    # then fail to come back, leaving the workstation with no resolver.
+    # Never install a config the daemon cannot parse: unbound would serve the
+    # old one until a restart, then fail to come back at all.
     validate: "/usr/sbin/unbound-checkconf %s"
   notify: Restart unbound
 
@@ -82,9 +71,8 @@
     state: started
 
 - name: Point the gateway's own resolver at unbound
-  # Supersedes the bridge above. From here the gateway resolves via unbound on
-  # loopback, which forwards through the tunnel -- one resolver for both the
-  # gateway and the workstation, and one place where DNS policy lives.
+  # Supersedes the bridge above: one resolver for both the gateway and the
+  # workstation, and one place where DNS policy lives.
   ansible.builtin.copy:
     dest: /etc/resolv.conf
     owner: root

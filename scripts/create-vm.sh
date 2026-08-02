@@ -30,11 +30,8 @@ else
   ssh_port=0
 fi
 
-# Bring an existing VM in line with the fleet: cpu/ram through UTM. A
-# fleet disk= change cannot be applied to a VM that already exists (see the
-# comment below), so it is only ever compared and reported, never acted on.
-# Only stops and starts the VM when cpu/ram really differ, so a repeat
-# 'make up' on an unchanged lab restarts nothing.
+# Bring an existing VM in line with the fleet: cpu/ram through UTM; disk= is
+# compare-and-report only (see below). Only restarts when cpu/ram differ.
 reconcile_existing_vm() {
   local want_cpu="$1" want_ram="$2" want_disk_gb="$3"
   local cur cur_cpu cur_ram disk candidate cur_bytes want_bytes cur_gb
@@ -50,13 +47,9 @@ reconcile_existing_vm() {
     change_hw=1
   fi
 
-  # Disk size is compare-and-report ONLY, never acted on. UTM imports and
-  # converts this staging file into its own bundle at VM creation time (see
-  # the note by "cp -c" below); once a VM exists in UTM, this file is not its
-  # live disk and resizing it here would change nothing the VM uses while
-  # making the staging file lie about the VM's real size on every later run.
-  # So the disk never contributes to the restart decision, and the file is
-  # never written here.
+  # Disk size is compare-and-report ONLY: UTM imported the staging file into
+  # its own bundle at creation, so resizing it here would change nothing the
+  # VM uses.
   disk=""
   for candidate in "${GEN_DIR}/${name}.qcow2" "${GEN_DIR}/${name}.raw"; do
     if [[ -f "$candidate" ]]; then
@@ -81,10 +74,8 @@ reconcile_existing_vm() {
     warn "${name}: could not check its disk size (no staging file in ${GEN_DIR}, was generated/ cleared after this VM was created?)"
   fi
 
-  # No hardware change: nothing to reconfigure, but 'make up' must still bring a
-  # stopped VM up (after a reboot or 'make down' the fleet is unchanged yet the
-  # VM is not running). Without this, up.sh would wait on SSH for a VM nothing
-  # ever started and time out. Starting an already-running VM is a no-op.
+  # No hardware change: still start a stopped VM (after 'make down' the fleet
+  # is unchanged yet nothing is running, and up.sh would wait on SSH forever).
   if [[ "$change_hw" -eq 0 ]]; then
     if [[ "$(vm_status "$name")" == "started" ]]; then
       ok "${name} unchanged (${cur_cpu} cpu, ${cur_ram} MiB)"
@@ -128,24 +119,17 @@ case "$img_fmt" in
   raw)   vm_disk="${GEN_DIR}/${name}.raw" ;;
   *)     vm_disk="${GEN_DIR}/${name}.${base_img##*.}" ;;
 esac
-# APFS clone (instant, space-free, sparse-preserving) with a plain-copy fallback.
-# This file is staging input only. create-vm.applescript hands it to UTM once,
-# and UTM imports and converts it into its own VM bundle under its app
-# container, in a format of its choosing. From that point on, this staged
-# file here in generated/ is never read or written by the running VM, so it
-# must only be resized here, before creation, never afterward.
+# APFS clone with a plain-copy fallback. Staging input only: UTM imports it
+# into its own bundle at creation, so it must be resized before creation,
+# never afterward.
 cp -c "$base_img" "$vm_disk" 2>/dev/null || cp "$base_img" "$vm_disk"
 
-# Grow to the requested size, but never shrink (the Kali image already exceeds
-# the usual default). This runs BEFORE the VM is created below, so the size
-# really does land in the VM UTM is about to build.
+# Grow to the requested size, never shrink (the Kali image already exceeds the
+# usual default). Runs BEFORE the VM is created, so the size lands in UTM.
 cur_bytes="$(disk_bytes "$vm_disk")"
 target_bytes=$(( disk_gb * 1024 * 1024 * 1024 ))
 if [[ -n "$cur_bytes" && "$target_bytes" -gt "$cur_bytes" ]]; then
-  # Pass the format explicitly. resize opens the image read-write, and for a
-  # raw disk qemu-img would otherwise probe the format and print a warning
-  # ("Image format was not specified ... probing guessed raw") on every run.
-  # img_fmt came straight from `qemu-img info` above, so it is always set.
+  # -f explicit: qemu-img would otherwise print a format-probing warning for raw.
   "$QEMU_IMG" resize -f "$img_fmt" "$vm_disk" "${disk_gb}G" >/dev/null
 fi
 

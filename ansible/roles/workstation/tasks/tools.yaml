@@ -1,23 +1,19 @@
 ---
-# Managed by Ansible (role: workstation).
-#
 # Kali function groups, selected per build in lab.conf (KALI_TOOL_GROUPS) and
-# handed here as workstation_tools_groups, without the kali-tools- prefix. This
+# handed here as workstation_tools_groups WITHOUT the kali-tools- prefix. This
 # file prepends it, which is what makes the kali-linux-* umbrellas unreachable:
-# measured 2026-07-30, all four pull openvpn and vpnc, while no kali-tools-*
-# group pulls any VPN package at all.
+# all four pull openvpn and vpnc, while no kali-tools-* group pulls any VPN
+# package at all.
 #
-# Everything here needs egress, and this host reaches a mirror ONLY because the
-# gateway forwards it into the tunnel. That is deliberate: the tools are
-# downloaded over the VPN, never over the real IP.
+# Everything here needs egress, and this host reaches a mirror ONLY through the
+# gateway's tunnel -- so the tools are downloaded over the VPN, never over the
+# real IP.
 #
 # Ordering is load-bearing: existence check, install, then a purge that is
 # simulated before it runs. Reversing the last two would let a purge take the
 # tools out with the client.
 
 - name: Fail clearly if tool groups are selected without egress
-  # apt here would otherwise fail deep in a mirror timeout, which reads as a
-  # broken playbook rather than "you enabled this one phase too early".
   ansible.builtin.fail:
     msg: >-
       KALI_TOOL_GROUPS selects tool groups but this host cannot reach a package
@@ -29,13 +25,9 @@
     - not workstation_has_egress | default(false) | bool
 
 - name: Refresh the apt cache before checking whether the groups exist
-  # apt-cache policy below reads whatever cache is already on disk; it never
-  # fetches. On a cache that is stale or was never populated (a fresh image,
-  # or one that has not run `apt update` since this play last touched it), a
-  # perfectly valid group name reads back with no Candidate line and the next
-  # task reports "does not exist in Kali's archive" -- a wrong diagnosis for a
-  # transport problem. cache_valid_time avoids re-fetching on every run once
-  # the cache is warm.
+  # apt-cache policy below never fetches: on a stale cache a perfectly valid
+  # group reads back with no Candidate line and the next task would diagnose a
+  # transport problem as a typo.
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
@@ -52,15 +44,13 @@
   when: workstation_has_egress | default(false) | bool
 
 - name: Fail on a tool group Kali does not have
-  # apt-cache policy exits 0 for a package it has never heard of and simply
-  # prints nothing, so the exit status is not the signal -- a real group has a
-  # "Candidate:" line with a version. Without this check a typo installs
-  # nothing, apt reports success, and the build is green with no tools.
+  # apt-cache policy exits 0 for a package it has never heard of and prints
+  # nothing, so the exit status is not the signal -- a real group has a
+  # "Candidate:" line. Without this a typo installs nothing and the build is
+  # green with no tools.
   #
-  # Mutation evidence: with this task deleted, KALI_TOOL_GROUPS="detect
-  # nosuchgroup" failed inside the install task instead, with a raw apt error
-  # ("No package matching 'kali-tools-nosuchgroup' is available"). That is the
-  # diagnosis this task exists to replace. Restored, verified green.
+  # Mutation: delete this task and an invalid group fails later inside the
+  # install task with a raw apt error instead.
   ansible.builtin.fail:
     msg: >-
       kali-tools-{{ item.item }} does not exist in Kali's archive. Fix
@@ -74,11 +64,9 @@
     - "('Candidate:' not in item.stdout) or ('Candidate: (none)' in item.stdout)"
 
 - name: Install the selected Kali tool groups
-  # Recommends stay ON, for the same reason the desktop keeps them: a Kali
-  # metapackage installed without its Recommends yields a subtly incomplete tool
-  # set. This is the longest single operation in the repo -- 2 to 650 packages
-  # per group (300 to 650 for the general-purpose groups), every byte through
-  # the multihop tunnel.
+  # Recommends stay ON, as for the desktop: a Kali metapackage without them is
+  # a subtly incomplete tool set. 2 to 650 packages per group, every byte
+  # through the multihop tunnel.
   ansible.builtin.apt:
     name: "{{ (workstation_tools_groups | default([])) | map('regex_replace', '^(.*)$', 'kali-tools-\\1') | list }}"
     state: present
@@ -89,11 +77,10 @@
     - workstation_has_egress | default(false) | bool
 
 # --- The purge, simulated before it runs -------------------------------------
-#
-# On the Kali of 2026-07-30 this is a no-op: no kali-tools-* group pulls a VPN
-# package. It is the net for the day that stops being true, and it runs
-# unconditionally rather than only after an install, so a package that arrives
-# any other way is caught on the next `make configure`.
+# A no-op on a Kali where no tool group pulls a VPN package; this is the net
+# for the day that stops being true. It runs unconditionally rather than only
+# after an install, so a package that arrives any other way is caught on the
+# next `make configure`.
 
 - name: List what is actually installed on the workstation
   ansible.builtin.shell:
@@ -118,30 +105,15 @@
   when: anon_vpn_present | length > 0
 
 - name: Name what the purge simulation reports removing
-  # Defined ONCE, as a fact, so the two guards below read the identical value
-  # rather than each re-deriving it from anon_purge_sim.stdout_lines -- two
-  # copies of this expression could drift the way the "Remv"-only regression
-  # already showed a single wrong copy can.
+  # Defined ONCE as a fact so both guards below read the identical value.
   #
-  # apt-get -s purge prefixes the packages named on its own command line with
-  # "Purg " and any OTHER package it drags along for the ride with "Remv "
-  # (removed but not purged, e.g. an auto-installed dependency losing its last
-  # reason to exist). Both are collateral candidates: measured against a live
-  # dependency chain (sentrypeer -> libosip2-15t64, pulled in by
-  # kali-tools-detect), a straight `apt-get -s purge libosip2-15t64` reports
-  # the cascade as "Purg sentrypeer" and "Purg kali-tools-detect", never as
-  # "Remv " at all. A regex matching only "Remv " sees zero collateral on
-  # exactly the case this guard exists for, and the real purge below then
-  # runs unopposed.
+  # Both "Purg " and "Remv " count as collateral: apt reports a dependency
+  # cascade of directly named packages as "Purg", so a regex matching only
+  # "Remv " sees zero collateral on exactly the case this guard exists for.
   #
-  # Two plain substitutions, not one regex_replace with a \1 backreference:
-  # measured on this Ansible/Jinja version, a backreference inside a folded
-  # (">-") block scalar comes out as the literal two characters "\2" rather
-  # than the captured text -- the guard would fire with a message naming
-  # nothing, so `collateral` would look non-empty every time this branch
-  # is even reachable, alarming on data it never actually read. Splitting
-  # into "strip the prefix" then "strip the trailing [version]" needs no
-  # backreference and is not sensitive to the scalar style.
+  # Two plain substitutions, not one regex_replace with a backreference: in a
+  # folded block scalar a \1 comes out as the literal characters, so the guard
+  # would fire with a message naming nothing.
   ansible.builtin.set_fact:
     anon_would_remove: >-
       {{ anon_purge_sim.stdout_lines | default([])
@@ -150,26 +122,15 @@
          | map('regex_replace', ' .*$', '') | list }}
 
 - name: Refuse to act on a purge simulation that could not be read
-  # anon_would_remove comes purely from a regex over apt's simulated output. If that
-  # parse yields nothing for a package that WAS named on the purge command line
-  # -- apt changes its wording, a locale difference, output landing on stderr
-  # instead of stdout -- then anon_would_remove is short of what was asked for, the
-  # collateral check below sees an artificially small (or empty) set, its
-  # `when:` goes false, and the real purge runs unopposed. That is the same
-  # failure shape as the "Remv"-only bug this file already fixed, one layer up:
-  # a guard that reads its own absence as "nothing to worry about."
+  # anon_would_remove comes purely from a regex over apt's output. If that
+  # parse yields nothing for a package that WAS named on the command line, the
+  # collateral check below sees an artificially small set, its `when:` goes
+  # false, and the real purge runs unopposed -- a guard reading its own absence
+  # as "nothing to worry about". Every member of anon_vpn_present must appear,
+  # because apt always echoes back what it was asked to purge.
   #
-  # anon_vpn_present is a subset of anon_would_remove BY CONSTRUCTION whenever the
-  # parse works: every name in anon_vpn_present was passed to `apt-get -s
-  # purge` on its own command line, and apt always echoes back what it was
-  # asked to purge with a "Purg " line, so every member gets one. If any member
-  # is missing from anon_would_remove, the parse itself is broken, not merely quiet.
-  #
-  # Mutation evidence: installed vpnc-scripts on the workstation (watch-listed,
-  # no reverse dependencies on this image), then broke the regex above to
-  # '^NEVERMATCH '. `make configure` stopped here, on this task's own message,
-  # and the real purge below was never reached; vpnc-scripts was still
-  # installed afterwards. Regex restored, rerun, purge ran for real.
+  # Mutation: break the regex above to '^NEVERMATCH ' and the play stops here,
+  # on this message, with the purge never reached.
   ansible.builtin.fail:
     msg: >-
       apt-get -s purge {{ anon_vpn_present | join(' ') }} did not report removing
@@ -182,22 +143,14 @@
 - name: Refuse a purge that would take the requested tools with it
   # The rule: what the purge removes must be a SUBSET of the watch list. Any
   # collateral means a tool group pulled a VPN client in as a hard dependency,
-  # so purging it would remove the tools that were asked for. Neither leaving
-  # the client nor silently losing the tools is acceptable without a decision,
-  # so this stops and says which packages are involved.
+  # so purging it would remove the tools that were asked for. Neither outcome
+  # is acceptable without a decision. Reached only once the task above has
+  # confirmed the simulation was parsed, so "no collateral" here can never mean
+  # "the parse found nothing at all".
   #
-  # Reached only once the task above has confirmed the simulation's output
-  # actually named every package that was asked to be purged, so "no
-  # collateral" here means the parse worked AND found none, never "the parse
-  # found nothing at all."
-  #
-  # Mutation evidence: `bash` was useless as a test case (no apt-level
-  # dependents on this image), so libosip2-15t64 was used instead, a library
-  # sentrypeer depends on and that kali-tools-detect pulls in. Added to the
-  # watch list, `make configure` stopped here naming exactly "sentrypeer
-  # kali-tools-detect" as the collateral, changed=0, nothing purged. That run
-  # is also what exposed the original '^Remv ' regex, which never matched the
-  # 'Purg ' lines apt emits for directly named packages, and so could not fire.
+  # Mutation: watch-list a library with dependents (libosip2-15t64, pulled in
+  # by kali-tools-detect) and the play stops here naming the collateral,
+  # changed=0, nothing purged.
   vars:
     collateral: "{{ anon_would_remove | difference(workstation_vpn_watch_list) }}"
   ansible.builtin.fail:
@@ -212,8 +165,7 @@
 
 - name: Purge the VPN client packages
   # Idempotent by construction: after the first run anon_vpn_present is empty,
-  # so this and the two tasks above are skipped and `make configure` reports no
-  # change.
+  # so this and the two guards above are skipped.
   ansible.builtin.apt:
     name: "{{ anon_vpn_present }}"
     state: absent

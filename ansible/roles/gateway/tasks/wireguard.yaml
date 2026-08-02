@@ -1,12 +1,11 @@
 ---
-# Derive the interface names ONCE, here, and let Task 4's ruleset consume them.
-# Hardcoding enp0s1/enp0s2 would be a ruleset that looks right and leaks the day
-# the kernel names them differently.
+# Derive the interface names ONCE here; the ruleset consumes them. Hardcoding
+# enp0s1/enp0s2 would give a ruleset that looks right and leaks the day the
+# kernel names them differently.
 - name: Find the internal NIC (the one holding the gateway's segment address)
-  # Kept as a LIST, not narrowed with `| first` here. If two interfaces somehow
-  # carried the segment address, `first` would pick one at fact-ordering's whim
-  # and produce a ruleset that names the wrong NIC -- which reads correctly and
-  # governs the wrong wire. The assert below rejects the ambiguity instead.
+  # Kept as a LIST, not narrowed with `| first`: if two interfaces carried the
+  # segment address, `first` would pick one at fact-ordering's whim and name
+  # the wrong NIC. The assert below rejects the ambiguity instead.
   ansible.builtin.set_fact:
     anon_internal_if_candidates: >-
       {{ ansible_facts.interfaces
@@ -22,41 +21,30 @@
     anon_internal_if: "{{ anon_internal_if_candidates | first | default('', true) }}"
 
 - name: Read the MAIN routing table's default route
-  # ansible_facts.default_ipv4 is derived from `ip route get 8.8.8.8`, which
-  # wg-quick's `AllowedIPs = 0.0.0.0/0` setup HIJACKS once the tunnel is up: it
-  # installs a fwmark rule plus `table main suppress_prefixlength 0`, so that
-  # lookup returns wg0, not the physical NIC, on every run after the first.
-  # The MAIN table's own default route is the one thing that policy routing
-  # does not rewrite, so read it directly with `ip route show table main`
-  # instead of trusting the fact. Confirmed on a live gateway with the tunnel
-  # already up: `ip route get 8.8.8.8` said `dev wg0`, `ip route show table
-  # main default` still said `dev enp0s1`.
+  # ansible_facts.default_ipv4 comes from `ip route get`, which wg-quick's
+  # policy routing hijacks once the tunnel is up: it returns wg0, not the
+  # physical NIC. The MAIN table's own default route is what policy routing
+  # does not rewrite.
   ansible.builtin.command: ip -4 route show table main default
   register: anon_main_default_route
   changed_when: false
 
 - name: Find the WAN NIC (the physical interface with the MAIN table's default route)
-  # Deliberately NOT `regex_search('dev (\S+)', '\1')`. With a capture-group
-  # reference that filter returns a one-element LIST on this ansible-core, but
-  # the return shape has varied across versions and nothing here pins the
-  # version. If a future core returned a plain string instead, `| first` would
-  # quietly yield its first CHARACTER -- 'e' rather than 'enp0s1' -- and the
-  # assert below would happily pass it (non-empty, not the internal NIC, not
-  # wg0). The ruleset would then name an interface that does not exist. That
-  # fails closed rather than leaking, but it presents as an unexplainable dead
-  # tunnel. Matching the whole token and trimming the prefix returns a string on
-  # every version, so the shape cannot drift.
+  # Deliberately NOT regex_search with a capture group: that filter's return
+  # shape (list vs string) has varied across ansible-core versions, and on a
+  # string `| first` would yield 'e' instead of 'enp0s1' -- which the assert
+  # below would happily accept. Matching the whole token returns a string on
+  # every version.
   ansible.builtin.set_fact:
     anon_wan_if: >-
       {{ (anon_main_default_route.stdout | regex_search('dev \S+') | default('', true))
          | regex_replace('^dev ', '') }}
 
 - name: Fail if either interface could not be identified
-  # Loudly, not silently: a wrong interface name produces a ruleset that passes
-  # inspection and permits egress on the wrong NIC. anon_wan_if == wg_interface
-  # is called out explicitly (not just "the two differ") because that is the
-  # exact silent failure mode that bit us: wg0 is non-empty and different from
-  # anon_internal_if, so the weaker check used to pass right through it.
+  # A wrong interface name produces a ruleset that passes inspection and
+  # permits egress on the wrong NIC. anon_wan_if == wg_interface is called out
+  # explicitly: wg0 is non-empty and differs from the internal NIC, so a
+  # weaker check passes straight through it.
   ansible.builtin.assert:
     that:
       - anon_internal_if_candidates | length == 1
@@ -72,8 +60,8 @@
       default route.
 
 - name: Install WireGuard
-  # wireguard-tools only: no vendor daemon. Mullvad's app is amd64-only and would
-  # manage its own routes and firewall rules against ours anyway.
+  # wireguard-tools only: no vendor daemon. Mullvad's app is amd64-only and
+  # would manage its own routes and firewall rules against ours.
   ansible.builtin.apt:
     name: wireguard-tools
     state: present
@@ -81,28 +69,19 @@
     cache_valid_time: 3600
 
 - name: Read the sanitised WireGuard config
-  # Read once into a fact so the MTU pin below can be folded into the same
-  # write as the config install -- see the next task for why they cannot be
-  # two separate tasks (copy, then lineinfile).
   ansible.builtin.set_fact:
     anon_wg_conf_raw: "{{ lookup('file', mullvad_wg_sanitized) }}"
   no_log: true
 
 - name: Install the WireGuard config with the tunnel MTU pinned
-  # Already sanitised by scripts/up.sh (DNS line removed, IPv6 stripped). MTU
-  # is pinned HERE rather than in the operator's file so regenerating the
-  # config on Mullvad's site cannot silently revert it.
+  # Already sanitised by scripts/up.sh. MTU is pinned here rather than in the
+  # operator's file so regenerating the config on Mullvad's site cannot revert
+  # it.
   #
-  # Deliberately ONE task, not copy-then-lineinfile: scripts/up.sh writes a
-  # FRESH sanitised temp file on every `make configure` (it never contains
-  # MTU -- that is only ever added here), so a plain `copy` of that file
-  # followed by a separate `lineinfile` adding MTU is NOT idempotent: the copy
-  # re-installs the MTU-less file every run, lineinfile puts MTU back, and the
-  # handler restarts wg-quick on every single run, forever (confirmed: three
-  # consecutive `make configure` runs each reported changed=3 on this pair).
-  # Building the final content (sanitised config + MTU line) once, here, and
-  # writing it with a single `copy` keeps the destination byte-for-byte stable
-  # across runs whenever the operator's source config is unchanged.
+  # Deliberately ONE task, not copy-then-lineinfile: up.sh writes a fresh
+  # MTU-less temp file every run, so a copy plus a separate lineinfile would
+  # restart wg-quick on every single run, forever. Building the final content
+  # here keeps the destination byte-for-byte stable across runs.
   ansible.builtin.copy:
     content: "{{ anon_wg_conf_raw | regex_replace('(^\\[Interface\\][^\\n]*\\n)', '\\1MTU = ' ~ wg_mtu ~ '\\n', multiline=true) }}"
     dest: "/etc/wireguard/{{ wg_interface }}.conf"

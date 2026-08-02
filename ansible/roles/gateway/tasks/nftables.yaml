@@ -13,8 +13,8 @@
     owner: root
     group: root
     mode: "0755"
-    # Never install a ruleset nft cannot parse: that would either leave the old
-    # rules in place (silently stale) or, after a reboot, no rules at all.
+    # Never install a ruleset nft cannot parse: that leaves either stale rules
+    # or, after a reboot, no rules at all.
     validate: "/usr/sbin/nft -c -f %s"
   notify: Reload nftables
 
@@ -27,8 +27,8 @@
     mode: "0755"
 
 - name: Enable IPv4 forwarding only once the ruleset is loaded
-  # ExecStartPost runs only if the unit started successfully, so a ruleset that
-  # fails to load leaves forwarding off and the workstation with no path at all.
+  # ExecStartPost runs only if the unit started, so a ruleset that fails to
+  # load leaves forwarding off and the workstation with no path at all.
   ansible.builtin.copy:
     dest: /etc/systemd/system/nftables.service.d/10-enable-forwarding.conf
     owner: root
@@ -42,9 +42,9 @@
   notify: Restart nftables
 
 - name: Enable nftables at boot
-  # `state: started` also LOADS the ruleset on the first run, before the handler
-  # would: from this task onwards the gateway is closed. Nothing between here and
-  # the resolv.conf task below needs DNS or clear-net, so the gap is inert.
+  # `state: started` also LOADS the ruleset on the first run, before the
+  # handler would: from here on the gateway is closed. Nothing between this and
+  # dns.yaml needs DNS or clear-net, so the gap is inert.
   ansible.builtin.systemd_service:
     name: nftables
     enabled: true
@@ -59,31 +59,21 @@
     mode: "0755"
 
 - name: Order WireGuard after nftables
-  # THE fail-closed mechanism. Without this, systemd may start wg-quick first and
-  # a boot could route before the ruleset exists.
+  # THE fail-closed mechanism: without After=, systemd may start wg-quick
+  # first and a boot could route before the ruleset exists.
   #
-  # PartOf= additionally makes the tunnel follow the firewall's lifecycle, which
-  # is the honest dependency: wg-quick installs its own `table ip wg-quick-wg0`
-  # for packet marking, and Debian's nftables.service runs `nft flush ruleset` on
-  # stop, which destroys it. Without PartOf, `systemctl stop nftables` leaves
-  # wg-quick "running" with its marking table silently gone -- no handshake, no
-  # egress, and nothing that says why. PartOf restarts wg-quick with nftables and
-  # stops it alongside, so the tunnel is either fully backed by a ruleset or not
-  # up at all. (Verified: without this, egress did not return after a stop/start
-  # cycle until wg-quick was restarted by hand.)
+  # Requires=, not Wants=: Wants is advisory, so a failed nftables.service
+  # would let wg-quick bring the tunnel up with no ruleset behind it.
   #
-  # Requires=, not Wants=: Wants= is advisory, so if nftables.service ever failed
-  # (a hand-edited unparseable file, a missing /etc/nftables.conf) wg-quick would
-  # start anyway and the tunnel would come up with NO ruleset behind it.
-  # Requires= makes that combination impossible.
+  # PartOf= because Debian's nftables.service runs `nft flush ruleset` on stop,
+  # which destroys wg-quick's own packet-marking table. Without it,
+  # `systemctl stop nftables` leaves wg-quick "running" with no handshake and
+  # nothing that says why.
   #
-  # This narrows the failure, it does not eliminate it: with nftables.service
-  # failed there is no ruleset at all, and the kernel's default is accept while
-  # net.ipv4.ip_forward stays 1. A failed nftables plus the WAN's default route
-  # is therefore still a fail-OPEN state whether or not wg-quick started. What
-  # actually keeps that from happening is `validate:` on the template task above,
-  # which makes an unparseable /etc/nftables.conf unable to land in the first
-  # place. See the report for the residual risk.
+  # This narrows the failure rather than eliminating it: with nftables failed
+  # there is no ruleset at all and the kernel default is accept. What prevents
+  # that is `validate:` on the template above, which stops an unparseable
+  # /etc/nftables.conf from landing in the first place.
   ansible.builtin.copy:
     dest: "/etc/systemd/system/wg-quick@{{ wg_interface }}.service.d/10-after-nftables.conf"
     owner: root
@@ -104,11 +94,8 @@
     state: started
     daemon_reload: true
 
-# NOTE ON DNS: loading the ruleset above kills the gateway's own resolver. Until
-# this point it resolved via SLIRP's 10.0.2.3 (the bootstrap path from Task 1),
-# and this ruleset drops :53 on the WAN the moment it applies. Nothing between
-# there and the end of this file needs to resolve a name, so the gap is inert.
-# dns.yaml runs next: it bridges DNS through the tunnel long enough to install
-# unbound, then hands resolution to unbound on loopback. Every /etc/resolv.conf
-# decision lives in that one file -- when this task list also wrote resolv.conf,
-# the two fought and every single run reported both of them changed.
+# Loading the ruleset above kills the gateway's own resolver (it drops :53 on
+# the WAN, and until now DNS came from SLIRP's 10.0.2.3). Nothing between here
+# and dns.yaml needs to resolve a name. dns.yaml owns every resolv.conf
+# decision -- when this file also wrote it, the two fought and every run
+# reported both changed.

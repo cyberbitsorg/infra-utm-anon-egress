@@ -1,23 +1,12 @@
 #!/usr/bin/env bash
-# The VPN watch list exists in two places on purpose: the workstation role
-# PURGES it, and scripts/verify.sh independently ASSERTS it stayed gone. That
-# duplication is the point -- an assertion that reads the same variable the
-# removal used would pass by construction.
+# The VPN watch list lives in two places on purpose: the workstation role
+# PURGES it and scripts/verify.sh independently ASSERTS it stayed gone (an
+# assertion reading the variable the removal used would pass by construction).
+# This test pins the two copies to each other without merging them; the count
+# floor below covers the case a diff cannot see, both copies shrinking together.
 #
-# What is not acceptable is the two drifting apart. A package added to the
-# role's purge list but not to verify's watch list is a package nobody asserts;
-# one added to verify but not the role is a FAIL nothing removes. This test
-# pins them to each other without merging them.
-#
-# Mutation evidence, both directions, applied and reverted:
-#
-#   - Delete `- openvpn` from the group_vars copy: fails on the drift diff
-#     ("< openvpn") AND on the named-package assertion below.
-#   - Add `- something-else` to the group_vars copy: fails on the drift diff
-#     ("> something-else").
-#
-# The count floor below covers the third direction, which a diff alone cannot
-# see: both copies shrinking together would otherwise compare equal and pass.
+# Mutation: remove `- openvpn` from the group_vars copy (fails on the drift
+# diff and the named-package check), or add one it does not have (drift diff).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

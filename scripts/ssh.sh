@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# SSH into a VM by short name. Usage: ssh.sh <short-name>
-#
-# The gateway is reached directly over its host port forward. Everything else is
-# internal-only -- no NAT NIC, no forward -- so it is reached by ProxyJump
-# through the gateway. That is not a convenience: it is the same single path the
-# inventory and verify.sh use, and there is deliberately no other way in.
+# SSH into a VM by short name. The gateway is reached over its host forward;
+# everything else hops through the gateway -- deliberately the only way in.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_config
 

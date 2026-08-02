@@ -1,44 +1,29 @@
 ---
-# Console/GUI password for the gateway user. Empty = leave the account locked as
-# cloud-init created it, so the UTM console shows boot output but accepts no login.
-#
-# Do NOT put a real value here: this file is tracked in git. The value comes from
-# GATEWAY_CONSOLE_PASSWORD in .env (gitignored, mode 0600), handed to Ansible
-# through a 0600 vars file by scripts/up.sh. `make preflight` generates one.
-#
-# SSH is key-only regardless of this setting.
+# Console/GUI password for the gateway user. Empty = leave the account locked
+# as cloud-init created it. The real value comes from GATEWAY_CONSOLE_PASSWORD
+# in .env via a 0600 vars file -- never put one here: this file is tracked.
+# SSH is key-only regardless.
 gateway_console_password: ""
 
-# Path on the CONTROL NODE to the operator's original WireGuard config (from
-# MULLVAD_WG_CONFIG in .env, threaded through by render_secret_vars). No task in
-# this role reads it directly -- it exists only so the vars file's
-# `mullvad_wg_config` key always resolves to a defined variable. The role
-# consumes the SANITISED copy below instead.
+# Path on the CONTROL NODE to the operator's original WireGuard config. No task
+# reads it directly; it only keeps the vars-file key defined. The role consumes
+# the sanitised copy below.
 mullvad_wg_config: ""
 
 # Path on the CONTROL NODE to the sanitised WireGuard config (DNS line and IPv6
 # stripped), injected by scripts/up.sh. Empty means "no tunnel": every Phase 2
-# task below is skipped and the workstation keeps Phase 1's zero egress, which
-# is a safe state, not a broken one.
+# task is skipped and the workstation keeps zero egress -- a safe state.
 mullvad_wg_sanitized: ""
 mullvad_endpoint_ip: ""
 mullvad_endpoint_port: ""
 
-# WireGuard interface name. Hardcoded rather than derived so the nftables ruleset
-# can reference it statically.
+# WireGuard interface name, hardcoded so the nftables ruleset can reference it.
 wg_interface: wg0
 
-# MTU for the tunnel. WireGuard's default is 1420, but this tunnel runs over
-# QEMU's SLIRP NAT where the effective path MTU is smaller; too large silently
-# breaks large packets (TLS handshakes stall) while ping still works -- so ping
-# is NOT a test of this value.
-#
-# 1280 measured good from the workstation: two real HTTPS transfers (57 KB and
-# 139 KB) completed in about two seconds. If large transfers ever start stalling
-# while ping stays fine, this is the first thing to lower (1280 -> 1240 -> 1200),
-# followed by `make configure`.
+# Tunnel MTU. 1280 measured good over QEMU's SLIRP NAT; too large silently
+# stalls large transfers while ping still works, so ping is NOT a test of this.
+# If HTTPS stalls, lower it (1280 -> 1240 -> 1200) and `make configure`.
 wg_mtu: 1280
 
-# Mullvad's resolver, reachable only inside the tunnel. Confirm against the
-# generated config's DNS line before trusting this default (design §6).
+# Mullvad's resolver, reachable only inside the tunnel.
 mullvad_dns: "10.64.0.1"

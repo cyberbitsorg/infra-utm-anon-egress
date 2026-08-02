@@ -1,28 +1,21 @@
 #!/usr/sbin/nft -f
 # Managed by Ansible (role: gateway). Do not edit on the host.
 #
-# The fail-closed kill-switch. Three chains at policy drop, and exactly two ways
-# out: WireGuard-encrypted UDP to ONE endpoint, and anything already inside the
-# tunnel. Fail-closed comes from ORDERING, not from a hook: nftables.service loads
-# this before wg-quick, so a tunnel that never comes up leaves forwarding that was
-# never permitted. There is no window to miss.
+# The fail-closed kill-switch: three chains at policy drop, and exactly two
+# ways out -- WireGuard-encrypted UDP to ONE endpoint, and anything already
+# inside the tunnel. Fail-closed comes from ORDERING, not from a hook:
+# nftables.service loads this before wg-quick, so a tunnel that never comes up
+# leaves forwarding that was never permitted. There is no window to miss.
 #
-# Every interface name below comes from a fact derived on the host (see
-# tasks/wireguard.yaml). Hardcoding enp0s1/enp0s2 would produce a ruleset that
-# reads correctly and leaks the day the kernel renames a NIC.
+# Every interface name comes from a fact derived on the host (see
+# tasks/wireguard.yaml); hardcoding them would read correctly and leak the day
+# the kernel renames a NIC.
 
-# Replace ONLY our own tables, never `flush ruleset`.
-#
-# `flush ruleset` also destroys `table ip wg-quick-wg0`, which wg-quick installs
-# to mark and route its own packets. Losing it does not leak -- it fails closed --
-# but it kills the tunnel completely: no handshake, no egress for the gateway or
-# the workstation, until wg-quick is restarted. Since our own handlers reload this
-# ruleset whenever it changes, `flush ruleset` would silently break the box on
-# every edit. Verified: after `systemctl restart nftables` the wg-quick table was
-# gone and egress only returned after `systemctl restart wg-quick@wg0`.
-#
-# The bare `table` line before each `delete` creates it if absent, so the delete
-# cannot fail on a fresh boot. The whole file still applies atomically.
+# Replace ONLY our own tables, never `flush ruleset`: that also destroys
+# `table ip wg-quick-wg0`, which wg-quick uses to mark its own packets. Losing
+# it fails closed but kills the tunnel completely, on every reload of this
+# file. The bare `table` line before each `delete` creates it if absent, so the
+# delete cannot fail on a fresh boot; the whole file still applies atomically.
 table inet filter
 delete table inet filter
 table ip nat
@@ -37,13 +30,12 @@ table inet filter {
     iif lo accept
     ct state established,related accept
 
-    # Management SSH, INBOUND over the SLIRP host port forward. Not reachable from
-    # the internet and it cannot carry workstation traffic outward, so it is not a
-    # leak -- and it is the repair path when the tunnel is broken.
+    # Management SSH, INBOUND over the SLIRP host port forward. Not reachable
+    # from the internet and it cannot carry workstation traffic outward, so it
+    # is not a leak -- and it is the repair path when the tunnel is broken.
     iifname "{{ anon_wan_if }}" tcp dport 22 accept
 
-    # The workstation: SSH (ProxyJump target), DNS to unbound, and ICMP so
-    # reachability checks work.
+    # The workstation: SSH (ProxyJump target), DNS to unbound, and ICMP.
     iifname "{{ anon_internal_if }}" tcp dport 22 accept
     iifname "{{ anon_internal_if }}" udp dport 53 accept
     iifname "{{ anon_internal_if }}" tcp dport 53 accept
@@ -54,44 +46,28 @@ table inet filter {
     type filter hook forward priority 0; policy drop;
 
     # unbound is the workstation's ONLY resolver. Without these two rules the
-    # accept below would happily forward a query to 1.1.1.1 into the tunnel: it
-    # would not leak the workstation's address (the exit node is the source) but
-    # it would hand a third party the full query stream and route around every
-    # policy unbound enforces. Design §3.3 requires that a direct :53 from the
-    # workstation to an external resolver fails, so drop it here.
-    #
-    # This does NOT touch queries to unbound itself: those are addressed to the
-    # gateway, so they land in the input chain, which accepts :53 on this NIC.
-    # Only traffic being FORWARDED past the gateway reaches these rules.
+    # accept below would forward a query to 1.1.1.1 into the tunnel: not an IP
+    # leak (the exit is the source), but it hands a third party the full query
+    # stream and routes around every policy unbound enforces. Queries to
+    # unbound itself are addressed to the gateway and land in the input chain.
     iifname "{{ anon_internal_if }}" udp dport 53 drop
     iifname "{{ anon_internal_if }}" tcp dport 53 drop
 
-    # The ONLY forward path in this repo. internal -> WAN is not expressed at all;
-    # policy drop covers it. If wg0 does not exist, this rule matches nothing and
-    # the workstation has no egress -- which is the entire promise.
+    # The ONLY forward path. internal -> WAN is not expressed at all; policy
+    # drop covers it. If wg0 does not exist this rule matches nothing and the
+    # workstation has no egress, which is the entire promise.
     iifname "{{ anon_internal_if }}" oifname "{{ wg_interface }}" accept
 
-    # Return traffic, and ONLY in the tunnel -> internal direction.
+    # Return traffic, and ONLY tunnel -> internal.
     #
-    # This rule used to be an unqualified `ct state established,related accept`,
-    # which was a clear-net leak. conntrack keys on the IP 5-tuple, NOT on the
-    # output interface, so an entry created while the tunnel was up stays
-    # ESTABLISHED (timeout 432000s -- five days) after the tunnel goes away. If
-    # anything then routes those packets at the WAN NIC, an unqualified rule
-    # accepts them and the workstation's traffic leaves in clear-net.
-    #
-    # That is reachable, not theoretical: wg-quick's del_if() deletes the policy
-    # routing rules BEFORE it deletes the interface, so between those two steps
-    # wg0 still exists (conntrack not yet flushed by the masquerade device
-    # notifier) while the effective route is already `default dev {{ anon_wan_if }}`.
-    # Confirmed on this gateway with `nft monitor trace`: a workstation packet
-    # with `iif {{ anon_internal_if }} oif {{ anon_wan_if }}` matched the old rule
-    # and got `verdict accept` onto the clear-net NIC.
-    #
-    # Scoping to the return direction closes it by construction: the accept now
-    # requires `iifname {{ wg_interface }}`, and when the tunnel is gone no packet
-    # can carry that input interface. The forward direction is already covered by
-    # the explicit rule above, so nothing legitimate is lost.
+    # This was once an unqualified `ct state established,related accept`, which
+    # was a clear-net leak: conntrack keys on the IP 5-tuple, NOT the output
+    # interface, so an entry created while the tunnel was up stays ESTABLISHED
+    # for five days after it goes away. That is reachable, not theoretical --
+    # wg-quick's del_if() removes its policy routes BEFORE the interface, so
+    # there is a window where the effective route is already the WAN. Requiring
+    # `iifname {{ wg_interface }}` closes it by construction: with the tunnel
+    # gone, no packet can carry that input interface.
     iifname "{{ wg_interface }}" oifname "{{ anon_internal_if }}" ct state established,related accept
   }
 
@@ -100,72 +76,46 @@ table inet filter {
 
     oif lo accept
 
-    # NOTE: there is deliberately NO unqualified `ct state established,related
-    # accept` here. It would have the same defect as the one removed from the
-    # forward chain: conntrack does not key on the output interface, so a flow
-    # established through the tunnel stays ESTABLISHED for days after the tunnel
-    # dies and an unqualified rule would re-admit it on the clear-net NIC. That
-    # it happens not to leak today is an accident of the gateway's own sockets
-    # being bound to wg0's source address (which vanishes with the interface, so
-    # the route lookup fails before nftables is ever consulted). Accidents are
-    # not security properties, so every accept below names its interface.
+    # There is deliberately NO unqualified `ct state established,related
+    # accept` here, for the same reason it was removed from the forward chain.
+    # That it happens not to leak today is an accident of the gateway's sockets
+    # being bound to wg0's source address; accidents are not security
+    # properties, so every accept below names its interface.
 
-    # The single clear-net exception: the WireGuard handshake and data to ONE
-    # endpoint. Pinned to an IP, so no DNS is needed to bring the tunnel up.
-    # No state match: this rule intentionally covers the whole flow.
+    # The single clear-net exception: WireGuard to ONE endpoint, pinned to an
+    # IP so no DNS is needed to bring the tunnel up. No state match: this rule
+    # intentionally covers the whole flow.
     oifname "{{ anon_wan_if }}" ip daddr {{ mullvad_endpoint_ip }} udp dport {{ mullvad_endpoint_port }} accept
 
-    # Replies to the INBOUND management SSH, and nothing else, on the WAN NIC.
-    # Scoped to source port 22 so this cannot carry anything else out in
-    # clear-net. Originating a new flow from source port 22 is root-only and
-    # would still need an inbound packet first, which no rule permits -- so it
-    # cannot be turned into an egress path.
+    # Replies to the inbound management SSH, scoped to source port 22 so it
+    # cannot carry anything else out. Originating a new flow from sport 22 is
+    # root-only and would still need an inbound packet first.
     #
-    # DELIBERATELY STATELESS: no `ct state established,related` here, unlike
-    # every other accept in this file. That qualifier made `make up` hang forever
-    # on a COLD build, and the mechanism is worth writing down because it is
-    # invisible on a warm one.
-    #
-    # conntrack only begins tracking when a ruleset that references `ct` is
-    # first loaded. On a fresh gateway that moment is the "Enable nftables at
-    # boot" task -- by which point Ansible is already connected over SSH. That
-    # in-flight connection has no conntrack entry, so the gateway's replies fail
-    # `ct state established`, get dropped by the policy, and the connection dies
-    # mid-task. The RST is dropped by the same rule, so the control node is never
-    # told: ssh waits forever, ansible waits on ssh, and `make up` hangs at that
-    # exact task with no error. Observed: a 15-minute stall, then nothing.
-    #
-    # Making the management path stateless in BOTH directions (the input chain's
-    # `tcp dport 22` is already stateless) means the one connection used to
-    # repair this box can never be cut by the firewall's own state. For a machine
-    # whose entire job is to be closed, being unable to lock yourself out of the
-    # repair path is worth more than the marginal tightening that `ct state`
-    # bought here.
+    # DELIBERATELY STATELESS, unlike every other accept here. conntrack only
+    # starts tracking when a ruleset referencing `ct` is first loaded -- on a
+    # cold build that moment is mid-play, while Ansible is already connected.
+    # That in-flight connection has no conntrack entry, so its replies failed
+    # `ct state established`, were dropped along with the RST, and `make up`
+    # hung forever at that exact task. Being unable to lock yourself out of the
+    # repair path is worth more than the marginal tightening.
     oifname "{{ anon_wan_if }}" tcp sport 22 accept
 
     # The gateway must be able to ORIGINATE one thing on the internal segment:
-    # a TCP connection to port 22. Ansible and scripts/ssh.sh reach the
-    # workstation with `ssh -W`, which makes sshd on THIS host open a brand-new
-    # connection out the internal NIC -- `ct state established` does not cover
-    # it, and without this rule policy drop cuts the workstation off from the
-    # control node entirely (the workstation play, `make verify` and
-    # `make ssh workstation` all fail). Not a leak: the segment is a host-only
-    # vmnet switch with no route to the host LAN or the internet, the rule faces
-    # inward, and the forward chain above still denies internal -> WAN. Kept to
-    # dport 22 rather than a blanket `oifname <internal> accept` because SSH is
-    # the only thing the gateway ever initiates inward -- unbound's replies, SSH
-    # replies and ICMP echo replies are all `established,related`.
+    # TCP to port 22. `ssh -W` makes sshd here open a brand-new connection out
+    # the internal NIC, which `ct state established` does not cover -- without
+    # this rule the workstation play, `make verify` and `make ssh workstation`
+    # all fail. Not a leak: the segment is host-only with no route anywhere,
+    # and the forward chain still denies internal -> WAN.
     oifname "{{ anon_internal_if }}" tcp dport 22 accept
 
-    # Replies to the workstation on the internal segment: unbound's DNS answers,
-    # sshd's answers, ICMP echo replies. Scoped to the internal NIC, which has no
-    # route off the host-only segment.
+    # Replies to the workstation: unbound's answers, sshd's answers, ICMP echo
+    # replies. Scoped to the internal NIC.
     oifname "{{ anon_internal_if }}" ct state established,related accept
 
-    # Everything else the gateway does goes through the tunnel, including apt and
-    # unbound's upstream queries. With the tunnel down the gateway cannot update
-    # either -- accepted deliberately: it is the anonymity layer, so a clear-net
-    # exception here would be a permanent leak path.
+    # Everything else the gateway does goes through the tunnel, including apt
+    # and unbound's upstream queries. With the tunnel down it can update
+    # neither -- accepted deliberately: a clear-net exception on the anonymity
+    # layer would be a permanent leak path.
     oifname "{{ wg_interface }}" accept
   }
 }
@@ -178,8 +128,8 @@ table ip nat {
   }
 }
 
-# IPv6: dropped outright rather than tunnelled. Parent spec §6 allows either;
-# fully blocked has strictly less leak surface and nothing here needs v6.
+# IPv6 is dropped outright rather than tunnelled: strictly less leak surface,
+# and nothing here needs v6.
 table ip6 filter {
   chain input   { type filter hook input priority 0; policy drop; }
   chain forward { type filter hook forward priority 0; policy drop; }
