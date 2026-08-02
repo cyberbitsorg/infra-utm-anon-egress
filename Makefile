@@ -42,7 +42,7 @@ status: ## Show status of all VMs
 ssh: ## SSH into a VM: make ssh gateway | make ssh workstation
 	@scripts/ssh.sh $(or $(VM),$(SSH_ARGS))
 
-console: ## Serial console (the display never works: cloud kernels have no DRM)
+console: ## Serial console: make console gateway | make console workstation
 	@scripts/console.sh $(or $(VM),$(SSH_ARGS))
 
 down: ## Stop all VMs (keeps them for later)
@@ -55,31 +55,19 @@ verify: ## Assert the security property: workstation isolated, reachable via gat
 	@scripts/verify.sh
 
 test: ## Run the shell unit tests (no UTM needed)
-	@bash tests/parse-vm-entry.sh
-	@bash tests/parse-nic-layout.sh
-	@bash tests/subnet-overlap.sh
-	@bash tests/seed-network.sh
-	@bash tests/gen-inventory.sh
-	@bash tests/ssh-jump.sh
-	@bash tests/secret-vars.sh
-	@bash tests/wg-config.sh
-	@bash tests/vpn-pkg-scan.sh
-	@bash tests/tool-groups.sh
-	@bash tests/vpn-watch-list.sh
-	@bash tests/mullvad-select.sh
+	@# Globbed, not listed: a hand-maintained list means a new test under
+	@# tests/ silently never runs, and a test that does not run is green by
+	@# default -- the exact failure mode this repo's guards exist to prevent.
+	@# `|| exit 1` stops at the first failure, as the explicit list did.
+	@set -e; ran=0; for t in tests/*.sh; do ran=$$((ran+1)); bash "$$t" || exit 1; done; \
+		[ "$$ran" -gt 0 ] || { echo "no tests found under tests/"; exit 1; }; \
+		echo "$$ran test file(s) passed"
 
 lint: ## Syntax-check scripts and Ansible
 	@bash -n scripts/*.sh tests/*.sh && echo "shell OK"
-	@# `cmd && lint || echo skipping` printed "not installed" when ansible-lint
-	@# was installed and FAILING, and exited 0 either way. Two states that must
-	@# never look alike now do not.
-	@#
-	@# ANSIBLE_COLLECTIONS_PATH is derived rather than assumed: ansible-lint ships
-	@# its own ansible-core, which does not see the collections bundled inside a
-	@# Homebrew `ansible` install. Without this it cannot resolve
-	@# community.general.timezone or ansible.posix.sysctl, reports them as unknown
-	@# modules, and stops at the `min` profile -- so every rule above that never
-	@# runs and the tree looks cleaner than it is.
+	@# ANSIBLE_COLLECTIONS_PATH is derived because ansible-lint's own
+	@# ansible-core does not see Homebrew ansible's bundled collections; without
+	@# it, unresolvable modules silently stop the lint at the `min` profile.
 	@if command -v ansible-lint >/dev/null 2>&1; then \
 		ANSIBLE_COLLECTIONS_PATH="$$(ansible-galaxy collection list 2>/dev/null \
 			| sed -n 's|^# \(.*\)/ansible_collections$$|\1|p' \
