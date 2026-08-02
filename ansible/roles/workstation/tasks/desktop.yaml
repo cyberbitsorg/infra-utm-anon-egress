@@ -216,49 +216,20 @@
     install_recommends: true
     update_cache: true
 
-- name: Purge the VPN plugins and every client behind them
-  # A GUI "add a VPN connection" wizard on the one host that must never hold VPN
-  # credentials is an invitation to break the design by hand. The plugins are
-  # Recommends of the desktop, so purging them leaves the desktop fully intact.
-  #
-  # THE SECOND HALF OF THIS LIST IS THE PART THAT IS EASY TO GET WRONG. Removing
-  # a NetworkManager plugin does NOT remove the client it depended on: apt leaves
-  # the orphan installed unless someone runs autoremove. That is not theoretical
-  # -- with every plugin below already purged, this guest was measured still
-  # carrying working /usr/sbin/openvpn, openconnect, vpnc and pptp binaries plus
-  # the strongswan IKE daemon. Purging the GUI while leaving the client behind
-  # removes the convenience and keeps the capability, which is the wrong half.
-  #
-  # Every name here was checked before being added -- see the group_vars
-  # comments on workstation_vpn_watch_list for what each addition found -- and
-  # this task purges only the named list, never autoremove (see below), so it
-  # cannot cascade into kali-desktop-xfce, lightdm, network-manager or Mullvad
-  # Browser by side effect. The list has grown since this comment last counted
-  # it (it names 27 packages now, not the ten it shipped with); re-check any
-  # new name against `apt-get -s purge <name>` before adding it, and if a
-  # package ever turns out to be load-bearing for XFCE, leave it installed and
-  # document it rather than breaking the desktop.
-  #
-  # Deliberately NOT `autoremove: true`. That would also drop ~30 unrelated
-  # orphans (easy-rsa, opensc, pcscd, libnl-3-200, assorted python3 modules) and
-  # make this task's effect depend on whatever else happens to be orphaned at the
-  # time -- a far larger blast radius than the problem warrants, and one that
-  # changes between runs. Named packages only.
-  #
-  # Idempotent by construction: `state: absent` on an already-absent package is a
-  # no-op, so this reports no change on every run after the first.
-  # scripts/verify.sh asserts this same set stays absent -- and, unlike this
-  # list, matches network-manager-* by pattern, so a plugin a future Kali adds is
-  # caught even though nothing here purged it.
-  #
-  # The list itself now lives in group_vars as workstation_vpn_watch_list,
-  # shared with tools.yaml. It is a superset of what this task used to name:
-  # mullvad-vpn (apt-pinned, so this is a no-op), wireguard, wireguard-tools and
-  # the strongswan metapackage were only in verify.sh's copy before.
-  ansible.builtin.apt:
-    name: "{{ workstation_vpn_watch_list }}"
-    state: absent
-    purge: true
+# The purge of workstation_vpn_watch_list used to live here, unsimulated and
+# ahead of tools.yaml's guard. That ran the destructive purge before anything
+# had checked whether it would take a requested tool group down with it:
+# main.yaml includes this file before tools.yaml, so the simulate-first guard
+# tools.yaml exists to provide never got a chance to run first.
+#
+# It moved to tools.yaml's "List what is actually installed" / "Name the VPN
+# packages" / "Simulate the purge" / "Refuse a purge that would take the
+# requested tools with it" / "Purge the VPN client packages" sequence, which
+# has no `when:` tying it to group selection or to the desktop -- it runs on
+# every `make configure` regardless -- so it already covers this exact list.
+# The purge there is simulated first and refuses to proceed if it would remove
+# anything outside workstation_vpn_watch_list, which a purge that could take
+# the desktop or the tools with it must be able to do.
 
 - name: Read the current default systemd target
   ansible.builtin.command: systemctl get-default
