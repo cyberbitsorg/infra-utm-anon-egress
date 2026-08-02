@@ -2,22 +2,14 @@
 # The Kali XFCE desktop and Mullvad Browser.
 #
 # ORDER IN THIS FILE IS LOAD-BEARING, and the rule is one rule: every drop-in
-# that overrides a packaged default is written BEFORE the package that ships it.
-#
-# The NetworkManager configuration, because kali-desktop-xfce hard-depends on
-# network-manager-gnome: install first and there is a window in which
-# NetworkManager starts, claims this host's only NIC, and rewrites
-# /etc/resolv.conf -- which silently destroys the tunnel-only DNS that Phase 2
-# exists to provide. Writing the config first means the daemon has never managed
-# anything, not even for a second.
-#
-# The lightdm no-autologin drop-in, for the same reason: lightdm's postinst
-# enables and starts the display manager during the install, so a drop-in
-# written afterwards leaves the packaged default in force for the length of it.
+# that overrides a packaged default is written BEFORE the package that ships
+# it. kali-desktop-xfce hard-depends on network-manager-gnome, so installing
+# first leaves a window in which NetworkManager claims this host's only NIC and
+# rewrites /etc/resolv.conf; lightdm's postinst enables and starts the display
+# manager during the install, so a drop-in written afterwards leaves the
+# packaged default in force for the length of it.
 
 - name: Fail clearly if the desktop is enabled without egress
-  # apt would otherwise fail deep inside a mirror timeout, which reads as a broken
-  # playbook rather than "you enabled this before the gateway could carry it".
   ansible.builtin.fail:
     msg: >-
       workstation_desktop is enabled but this host cannot reach a package mirror.
@@ -28,25 +20,24 @@
     - not workstation_has_egress | default(false) | bool
 
 - name: Fail clearly if the desktop is enabled without a console password
-  # A graphical greeter on an account cloud-init locked cannot be logged into at
-  # all. Better to say so now than after installing 951 packages over a VPN.
+  # A greeter on an account cloud-init locked cannot be logged into at all.
+  # Better to say so now than after installing ~950 packages over a VPN.
   ansible.builtin.fail:
     msg: >-
       workstation_desktop is enabled but workstation_console_password is empty.
       cloud-init locks the account, so lightdm would present a greeter no password
       can pass. Put a value on the WORKSTATION_CONSOLE_PASSWORD line of your
       existing .env, then re-run. (`make preflight` will NOT do this for you: it
-      only ever generates passwords when .env does not exist yet, and anyone
-      reading this message necessarily has one.) Or turn the desktop back off.
+      only generates passwords when .env does not exist yet.) Or turn the
+      desktop back off.
   when:
     - workstation_desktop | default(false) | bool
     - (workstation_console_password | default('')) | length == 0
 
 - name: Find the workstation's NIC (the one holding its segment address)
-  # Kept as a LIST and asserted below rather than narrowed with `| first`. A
+  # Kept as a LIST and asserted below rather than narrowed with `| first`: a
   # config that marks the WRONG device unmanaged reads perfectly and protects
-  # nothing -- the same failure mode the gateway's ruleset avoids by deriving its
-  # interfaces instead of hardcoding them.
+  # nothing.
   ansible.builtin.set_fact:
     anon_ws_if_candidates: >-
       {{ ansible_facts.interfaces
@@ -71,8 +62,8 @@
     anon_ws_if: "{{ anon_ws_if_candidates | first }}"
 
 - name: Ensure the NetworkManager config directory exists
-  # Created before the package, so the drop-in below is already in place the first
-  # time NetworkManager ever starts.
+  # Created before the package, so the drop-in is in place the first time
+  # NetworkManager ever starts.
   ansible.builtin.file:
     path: /etc/NetworkManager/conf.d
     state: directory
@@ -81,56 +72,33 @@
     mode: "0755"
 
 - name: Remove the old 00-prefixed NetworkManager drop-in, if present
-  # An earlier version of this role wrote 00-anon-egress-unmanaged.conf. A 00-
-  # prefix sorts FIRST, which made it the WEAKEST file in the directory rather
-  # than the strongest -- see the note below. Ansible's copy below only ever
-  # creates the new 99- file; it will not remove a stale 00- one left over from
-  # that earlier run, and leaving both in place is worse than either alone (two
-  # files, same keys, conflicting authority by sort order). No-op on a clean
-  # host that never had the old file.
+  # An earlier version of this role wrote 00-anon-egress-unmanaged.conf, which
+  # sorted FIRST and was therefore the weakest file in the directory. Ansible
+  # will not remove it on its own, and two files with the same keys and
+  # conflicting authority is worse than either alone.
   ansible.builtin.file:
     path: /etc/NetworkManager/conf.d/00-anon-egress-unmanaged.conf
     state: absent
 
 - name: Take NetworkManager's hands off the network
-  # NetworkManager is a hard dependency of kali-desktop-xfce, so it WILL be
-  # installed. It is not masked: with no managed device and no DNS control it can
-  # do no harm, and masking it only leaves a broken-looking applet on the desktop.
+  # NetworkManager is a hard dependency of the desktop, so it WILL be
+  # installed. Not masked: with no managed device and no DNS control it can do
+  # no harm, and masking only leaves a broken-looking applet.
   #
-  # dns=none is the important half. NetworkManager's default is to rewrite
-  # /etc/resolv.conf, which on this host points at the gateway's unbound and is
-  # the ONLY resolver permitted -- the gateway's forward chain drops :53 to
-  # anywhere else. If NetworkManager repointed it, DNS would break rather than
-  # leak, but the box would look inexplicably broken.
+  #   dns=none                 it must not rewrite /etc/resolv.conf, which
+  #                            points at the gateway's unbound -- the only
+  #                            resolver the forward chain permits.
+  #   unmanaged-devices        the NIC is static, configured by cloud-init.
+  #   connectivity.enabled     Debian ships a drop-in pointing the checker at
+  #                            network-test.debian.org. Not an IP leak (it
+  #                            would go through the tunnel), but a recurring,
+  #                            distinctively-shaped beacon on the one host
+  #                            whose job is to be indistinguishable.
   #
-  # unmanaged-devices is the other half: the NIC is statically configured by
-  # cloud-init/netplan and never changes, so there is nothing for NetworkManager
-  # to usefully do with it.
-  #
-  # connectivity.enabled=false is the third. Debian's network-manager ships
-  # /usr/lib/NetworkManager/conf.d/20-connectivity-debian.conf, which points the
-  # connectivity checker at http://network-test.debian.org/nm; it sorts before
-  # this file and sets a key this file otherwise leaves alone, so it survives the
-  # merge intact. To be precise about the risk: that probe is NOT an IP leak.
-  # This host has exactly one route and it is the gateway's, so the request would
-  # travel through the tunnel like everything else. What it would be is a
-  # recurring, unauthenticated, distinctively-shaped beacon announcing "a Debian
-  # NetworkManager lives behind this exit IP" on a schedule -- a fingerprint and
-  # a piece of traffic pattern, on the one host whose job is to be
-  # indistinguishable. There is nothing to gain from the check either: with every
-  # device unmanaged, NM has no connection whose state it could usefully change.
-  #
-  # Filename is prefixed 99-, not 00-. NetworkManager reads
-  # /etc/NetworkManager/conf.d/*.conf in ALPHABETICAL order and, for a plain key
-  # assignment, the LAST file read wins -- later files override earlier ones. A
-  # 00- prefix would sort first and make this the WEAKEST file in the directory:
-  # any other drop-in (one the network-manager package ships, a future Kali
-  # update, or the well-known 10-globally-managed-devices.conf pattern setting
-  # unmanaged-devices=none) would sort after it and silently win, handing the NIC
-  # and /etc/resolv.conf back to NetworkManager. This file's entire purpose is to
-  # be authoritative, so it must sort LAST by construction, not by the accident
-  # of no one else having shipped a conflicting drop-in yet. Do not renumber this
-  # back to 00- for tidiness.
+  # Filename is 99-, NOT 00-: NetworkManager reads conf.d/*.conf in
+  # alphabetical order and the LAST file wins. A 00- prefix would make this the
+  # weakest file, so any later drop-in (a packaged one, a future Kali update)
+  # would silently hand back the NIC and resolv.conf. Do not renumber this.
   ansible.builtin.copy:
     dest: /etc/NetworkManager/conf.d/99-anon-egress-unmanaged.conf
     owner: root
@@ -148,10 +116,6 @@
       enabled=false
 
 - name: Ensure the lightdm config directory exists
-  # Created BEFORE lightdm exists, for the same reason as the NetworkManager
-  # directory above: the drop-in has to be on disk before the package that would
-  # otherwise decide the question. An empty /etc/lightdm/lightdm.conf.d on a host
-  # with no display manager is inert.
   ansible.builtin.file:
     path: /etc/lightdm/lightdm.conf.d
     state: directory
@@ -160,23 +124,10 @@
     mode: "0755"
 
 - name: Never auto-log in to the desktop
-  # The same decision already applied to the getty auto-login drop-ins this role
-  # removes: an unauthenticated session on an anonymity workstation is not
-  # acceptable, and a desktop that logs itself in hands a full session to anyone
-  # who opens the UTM window.
-  #
-  # Asserted explicitly rather than trusting the packaged default, because that
-  # default is Kali's to change and this is a property we depend on. The empty
-  # autologin-user overrides anything set in /etc/lightdm/lightdm.conf: files in
-  # lightdm.conf.d are read after it, and 99- sorts last.
-  #
-  # ORDER IS LOAD-BEARING, exactly as it is for the NetworkManager drop-in: this
-  # must be written BEFORE kali-desktop-xfce, because lightdm's postinst enables
-  # and starts the display manager as part of the install. Written afterwards,
-  # the packaged default IS the live configuration for the length of that install
-  # -- and permanently, on any run where the install succeeds and this task does
-  # not. "Refuses to trust the packaged default" has to be true of the ordering
-  # as well as of the file.
+  # An unauthenticated session on an anonymity workstation is not acceptable,
+  # and a desktop that logs itself in hands a full session to anyone who opens
+  # the UTM window. Asserted rather than trusting Kali's packaged default,
+  # which is theirs to change. 99- sorts last, so it overrides lightdm.conf.
   ansible.builtin.copy:
     dest: /etc/lightdm/lightdm.conf.d/99-anon-egress-no-autologin.conf
     owner: root
@@ -189,53 +140,29 @@
       autologin-user-timeout=0
 
 - name: Install the Kali XFCE desktop
-  # WITH recommends, deliberately. Measured on this image: 951 packages with
-  # recommends versus 537 without. The 414 extra are fonts, codecs and utilities
-  # that make the desktop feel complete -- a desktop metapackage installed without
-  # its Recommends is subtly broken in ways that are tedious to chase later.
+  # WITH recommends, deliberately: measured ~950 packages versus 537 without,
+  # and the extra fonts, codecs and utilities are what keep a desktop
+  # metapackage from being subtly broken. The cost is that recommends also
+  # pull NetworkManager VPN plugins, which tools.yaml purges -- they are
+  # Recommends, not Depends, so removing them cannot cascade.
   #
-  # The cost is that recommends ALSO pull in NetworkManager VPN plugins, which
-  # the next task purges. No count is given here on purpose: the number is Kali's
-  # to change between releases, and a stale one in a comment reads as an
-  # assurance that the list below is complete. It is not, which is why
-  # scripts/verify.sh matches network-manager-* by pattern and not only by name.
-  # They are Recommends and not Depends, so removing them cannot cascade into
-  # removing the desktop.
-  #
-  # This is the longest single operation in the repo: ~951 packages, every byte of
-  # it through the WireGuard tunnel. Expect many minutes with no output. The SSH
-  # keepalives configured in ansible.cfg are what keep this from looking like a
-  # hang; they are answered at the transport layer while apt works.
+  # The longest single operation in the repo, every byte through the tunnel.
+  # Expect many minutes with no output; ansible.cfg's keepalives are what keep
+  # that from looking like a hang.
   #
   # No cache_valid_time: a FAILED apt update still refreshes the timestamp, and
-  # the next hour of retries would then skip the update and report the useless
-  # "No package matching 'kali-desktop-xfce' is available".
+  # the next hour of retries would report the useless "No package matching
+  # 'kali-desktop-xfce' is available".
   ansible.builtin.apt:
     name: kali-desktop-xfce
     state: present
     install_recommends: true
     update_cache: true
 
-# The purge of workstation_vpn_watch_list used to live here, unsimulated and
-# ahead of tools.yaml's guard. That ran the destructive purge before anything
-# had checked whether it would take a requested tool group down with it:
-# main.yaml includes this file before tools.yaml, so the simulate-first guard
-# tools.yaml exists to provide never got a chance to run first.
-#
-# It moved to tools.yaml's "List what is actually installed" / "Name the VPN
-# packages" / "Simulate the purge" / "Refuse a purge that would take the
-# requested tools with it" / "Purge the VPN client packages" sequence, which
-# has no `when:` tying it to group selection or to the desktop -- it runs on
-# every `make configure` regardless -- so it already covers this exact list.
-# The purge there is simulated first and refuses to proceed if it would remove
-# anything outside workstation_vpn_watch_list, which a purge that could take
-# the desktop or the tools with it must be able to do.
-#
-# This is not hypothetical. While testing the guard, a package with real
-# dependents was put on the watch list and the version of this task that used
-# to live here attempted the removal for real, before tools.yaml was reached.
-# In that session only apt's own refusal to remove an essential package stopped
-# it, and that protection does not extend to anything else on the list.
+# The VPN purge deliberately lives in tools.yaml, not here: main.yaml includes
+# this file first, so a purge here would run before tools.yaml's simulate-first
+# guard had a chance to check whether it would take a requested tool group down
+# with it. That guard runs unconditionally, so it already covers this list.
 
 - name: Read the current default systemd target
   ansible.builtin.command: systemctl get-default
@@ -243,47 +170,43 @@
   changed_when: false
 
 - name: Boot into the graphical target
-  # `systemctl set-default` is not idempotent in Ansible's eyes -- it rewrites the
-  # symlink and always reports success -- so the read above gates it and keeps
-  # `make configure` at changed=0.
+  # `systemctl set-default` always reports success, so the read above gates it
+  # and keeps `make configure` at changed=0.
   ansible.builtin.command: systemctl set-default graphical.target
   changed_when: true
   when: anon_default_target.stdout | trim != 'graphical.target'
 
 - name: Start the display manager
-  # set-default only decides what the NEXT boot does; it does not start anything
-  # now. Installing lightdm does not launch it either -- systemd had already
-  # reached its target before the package existed. Without this the role finishes
-  # "successfully" with a fully installed desktop and no greeter, which is a
-  # confusing state to hand someone: the UTM window still shows a text console
-  # and nothing says why.
-  #
-  # enabled AND started: enabled makes it survive a reboot, started makes the
-  # greeter appear on the run that installed it.
+  # set-default only decides the NEXT boot, and installing lightdm does not
+  # launch it (systemd reached its target before the package existed). Without
+  # this the role finishes with a fully installed desktop and no greeter.
   ansible.builtin.systemd_service:
     name: lightdm
     enabled: true
     state: started
 
+- name: Install or remove the SPICE guest agent (host clipboard sharing)
+  # UTM supplies the host half already; only this package was missing. Removed
+  # rather than skipped when off, so flipping the flag really closes it.
+  ansible.builtin.apt:
+    name: spice-vdagent
+    state: "{{ 'present' if (workstation_clipboard | default(false) | bool) else 'absent' }}"
+    purge: true
+
+- name: Enable the SPICE agent daemon
+  ansible.builtin.systemd_service:
+    name: spice-vdagentd
+    enabled: true
+    state: started
+  when: workstation_clipboard | default(false) | bool
+
 - name: Install Mullvad's repository signing key
-  # Fetched through the tunnel, like everything else on this host.
+  # ASCII-armoured under /usr/share/keyrings and referenced by `signed-by=`
+  # below. NEVER apt-key: it trusts the key for EVERY repository on the host.
   #
-  # Stored as an ASCII-armoured file under /usr/share/keyrings and referenced by
-  # `signed-by=` below. NEVER apt-key: it is deprecated and, worse, it trusts the
-  # key for EVERY repository on the host, so a compromise of Mullvad's key would
-  # let it sign packages claiming to be Kali's.
-  #
-  # The expected fingerprint is NOT recorded in a comment -- the two tasks below
-  # check it. A comment saying "a rotation would show up in a diff" is false
-  # unless something compares, and on this repo's normal workflow (destroy and
-  # rebuild) the file does not exist beforehand, so every build would otherwise
-  # blind-fetch whatever the URL serves and trust it immediately.
-  #
-  # Deliberately NOT a `checksum:` on this get_url: Mullvad re-armouring the same
-  # key, or adding a second signing subkey, changes the file's digest without
-  # changing who is trusted, and that would break every build for no security
-  # reason. The check below asserts the thing that matters -- that the key we
-  # decided to trust is in the keyring -- and tolerates the things that do not.
+  # Deliberately no `checksum:` -- Mullvad re-armouring the same key would
+  # change the digest without changing who is trusted. The two tasks below
+  # assert the thing that matters instead.
   ansible.builtin.get_url:
     url: https://repository.mullvad.net/deb/mullvad-keyring.asc
     dest: /usr/share/keyrings/mullvad-keyring.asc
@@ -298,13 +221,10 @@
   changed_when: false
 
 - name: Fail if Mullvad's signing key is not the one this role decided to trust
-  # PRESENCE, not an exact key list. The keyring legitimately carries more than
-  # one key (three at the time of writing), and Mullvad may add another without
-  # that meaning anything is wrong -- but the one below disappearing, or being
-  # replaced, is a repository takeover until proven otherwise.
-  #
-  # Matched between colons so it must be a whole field of gpg's --with-colons
-  # record rather than a substring that happens to appear somewhere.
+  # PRESENCE, not an exact key list: the keyring legitimately carries several
+  # keys and Mullvad may add another. The one below disappearing or being
+  # replaced is a repository takeover until proven otherwise. Matched between
+  # colons, so it must be a whole field of gpg's record.
   ansible.builtin.assert:
     that:
       - "':' ~ anon_mullvad_key_fpr ~ ':' in anon_mullvad_keyring.stdout"
@@ -323,24 +243,12 @@
 
 - name: Refuse to install any Mullvad VPN client here
   # Written BEFORE the repository is added, so there is never a moment in which
-  # `mullvad-vpn` is installable on this host.
+  # mullvad-vpn is installable. Mullvad's arm64 repository carries it alongside
+  # the browser, and this host must never hold VPN credentials.
   #
-  # Mullvad's arm64 repository carries mullvad-vpn alongside the browser. This
-  # host must never hold VPN credentials -- that is the repo's central invariant
-  # -- so the package is pinned to -1, which makes apt refuse it even when asked
-  # for it by name. scripts/verify.sh asserts it stays ABSENT; the last task in
-  # this file asserts this pin is what is keeping it that way.
-  #
-  # `Package:` is a GLOB, and that field genuinely is glob-matched (unlike
-  # `Pin: origin`, which is a plain string comparison -- see below). So
-  # mullvad-vpn* covers a mullvad-vpn-beta, or whatever a renamed successor is
-  # called, instead of leaving the obvious way around the pin open: pinning one
-  # exact name only works until Mullvad ships a second one.
-  #
-  # `Pin: origin *` is left EXACTLY as it is. It was measured working on this
-  # guest -- `apt-cache policy mullvad-vpn` reports the candidate at priority -1
-  # and `apt-get -s install mullvad-vpn` refuses -- and the task at the end of
-  # this file will fail the build loudly if that ever stops being true.
+  # `Package:` is glob-matched, so mullvad-vpn* also covers a renamed or beta
+  # successor. `Pin: origin *` is measured working on this guest; the last task
+  # in this file fails the build loudly if that ever stops being true.
   ansible.builtin.copy:
     dest: /etc/apt/preferences.d/99-anon-egress-no-vpn-client
     owner: root
@@ -355,7 +263,7 @@
       Pin-Priority: -1
 
 - name: Add Mullvad's apt repository
-  # arch=arm64 keeps apt from asking this repo about foreign architectures, and
+  # arch=arm64 keeps apt from asking this repo about foreign architectures;
   # signed-by scopes the key to this repository alone.
   ansible.builtin.copy:
     dest: /etc/apt/sources.list.d/mullvad.list
@@ -368,37 +276,24 @@
 
 - name: Install Mullvad Browser
   # The ALPHA package, and not by preference: Mullvad publishes stable
-  # mullvad-browser for amd64 only. Verified against
-  # https://repository.mullvad.net/deb/stable/dists/stable/main/binary-arm64/Packages,
-  # which lists exactly two packages -- mullvad-browser-alpha and mullvad-vpn.
-  #
-  # It is worth the alpha channel: the browser fingerprint is what the tunnel
-  # cannot hide, and Mullvad Browser's value is that every user of it looks the
-  # same. A hand-hardened Firefox would be MORE identifiable, not less, which is
-  # why the obvious "just use the stable distro browser" is the wrong trade here.
+  # mullvad-browser for amd64 only, and their arm64 archive lists exactly
+  # mullvad-browser-alpha and mullvad-vpn. Worth it: the browser fingerprint is
+  # what the tunnel cannot hide, and a hand-hardened Firefox would be MORE
+  # identifiable, not less.
   ansible.builtin.apt:
     name: mullvad-browser-alpha
     state: present
     update_cache: true
 
 - name: Assert apt really does refuse the Mullvad VPN client
-  # Runs last, once the repository is added and the cache has been refreshed by
-  # the task above, because a pin can only be tested against a repository apt has
-  # actually read.
+  # Runs last, once the repository is added and the cache refreshed: a pin can
+  # only be tested against a repository apt has actually read.
   #
-  # Why this exists at all: verify.sh asserts only that mullvad-vpn is ABSENT,
-  # which is exactly as true on a host where the pin is dead and nobody happened
-  # to type `apt install mullvad-vpn`. That is the package-management form of
-  # scoring silence as security. If a future apt changes how `Pin: origin`
-  # matches, this build must break loudly here rather than quietly hand the one
-  # credential-free host in the design an installable VPN client.
-  #
-  # TWO conditions, and both are needed. "Nothing offers it at a usable priority"
-  # is vacuously true when apt cannot see the package at all -- a repository that
-  # failed to refresh would score as a working pin -- so the package must first
-  # be VISIBLE in the version table, and only then is its priority allowed to
-  # decide. The simulated install is the behavioural half: it asks apt the exact
-  # question an operator would.
+  # verify.sh asserts only that mullvad-vpn is ABSENT, which is equally true on
+  # a host where the pin is dead and nobody happened to type `apt install`.
+  # This is the behavioural half. TWO conditions, both needed: "nothing offers
+  # it at a usable priority" is vacuously true when apt cannot see the package
+  # at all, so it must first be VISIBLE in the version table.
   ansible.builtin.shell: |
     set -euo pipefail
     policy="$(apt-cache policy mullvad-vpn)"

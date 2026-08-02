@@ -96,6 +96,27 @@ KALI_IMG_FILE="kali-genericcloud-arm64.raw"
 # talk to in a VM with one virtual NIC.
 KALI_TOOL_GROUPS=""
 
+# --- Host clipboard ----------------------------------------------------------
+# Share the clipboard between the Mac and the workstation desktop (SPICE agent;
+# UTM's half is already on). "yes" or "no"; empty means no.
+#
+# It does NOT weaken the network invariant: virtio-serial is not a route, and
+# the tunnel, DNS and kill-switch are untouched. What it costs is
+# compartmentalisation, in three concrete ways:
+#
+#   1. Universal Clipboard (Handoff) syncs the Mac's clipboard to your iPhone
+#      via iCloud, i.e. to your Apple ID. This is the one that can genuinely
+#      deanonymise you. Turn Handoff off before enabling this.
+#   2. Clipboard managers (Raycast, Alfred, Maccy, Paste) persist clipboard
+#      history to disk on the host, where it outlives 'make destroy' and
+#      defeats the workstation's disposability.
+#   3. Wrong paste direction: with a bridge in place you can paste something
+#      identity-linked INTO the anonymous session out of muscle memory. That
+#      channel does not exist until you enable this.
+#
+# 1 and 2 are host settings you can fix. 3 is yours to manage.
+WORKSTATION_CLIPBOARD="no"
+
 # --- VM fleet ---------------------------------------------------------------
 # Each entry: "name:role [cpu=N] [ram=MiB] [disk=GB]"
 #

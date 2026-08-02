@@ -1,12 +1,7 @@
 ---
-# The workstation is internal-only: it has exactly one NIC, on a host-only switch
-# with no gateway of its own. Everything below therefore reaches the internet only
-# because the gateway forwards it into the WireGuard tunnel -- every package here
-# is downloaded over the VPN, never over the real IP. That ordering is the reason
-# these lists stayed empty until Phase 2 worked.
-#
-# Phase 3's desktop, Mullvad Browser and Kali toolset sit on top of this base
-# (see workstation_desktop and workstation_tools_groups below).
+# The workstation is internal-only: everything below reaches the internet only
+# because the gateway forwards it into the tunnel, so every package here is
+# downloaded over the VPN, never over the real IP.
 common_packages:
   - ca-certificates
   - curl
@@ -20,64 +15,41 @@ common_packages:
   - vim
 
 # --- Egress-dependent features ----------------------------------------------
-# Both were off through Phase 1, when this host had no route off the internal
-# segment at all. Phase 2's gateway now forwards it through the VPN tunnel, so
-# they are on -- and Kali's kernel is downloaded through the tunnel rather than
-# over the real IP, which is the whole point of doing it in this order.
-#
-# workstation_has_egress is the honest statement of fact ("the gateway forwards
-# this host's traffic now"); workstation_console_kernel is the feature that needs
-# it. They stay separate so that enabling the feature without the fact fails with
-# a clear message instead of an apt timeout. If the tunnel is ever removed, set
-# workstation_has_egress back to false FIRST.
+# workstation_has_egress states the fact ("the gateway forwards this host");
+# workstation_console_kernel is the feature that needs it. Separate, so
+# enabling the feature without the fact fails with a clear message instead of
+# an apt timeout. If the tunnel is ever removed, set has_egress false FIRST.
 workstation_has_egress: true
 workstation_console_kernel: true
 
-# Install the Kali XFCE desktop and Mullvad Browser. Needs workstation_has_egress
-# for the same reason the console kernel does -- 951 packages and a browser have
-# to come from somewhere, and this host's only route is the gateway's tunnel.
-#
-# It ALSO needs workstation_console_password to be set. cloud-init locks the
-# account, so a graphical greeter with no password is a login prompt that cannot
-# be passed. The role fails early and says so rather than leaving you staring at
-# an unusable greeter.
+# Install the Kali XFCE desktop and Mullvad Browser. Needs egress, and needs
+# workstation_console_password set: cloud-init locks the account, so a greeter
+# with no password is a login prompt that cannot be passed.
 workstation_desktop: true
 
-# Console/GUI password for the workstation user. Empty = leave the account locked
-# as cloud-init created it, so the console is diagnostic only (you can read boot
-# and cloud-init output, but not log in). A desktop greeter needs this set.
-#
-# Do NOT put a real value here: this file is tracked in git. The value comes from
-# WORKSTATION_CONSOLE_PASSWORD in .env (gitignored, mode 0600), handed to Ansible
-# through a 0600 vars file by scripts/up.sh. `make preflight` generates one.
-#
-# This is the workstation's only recovery path: it has no host port forward, so if
-# the gateway or its own sshd fails, the UTM console is the way in.
-# SSH is key-only regardless of this setting.
+# Host<->guest clipboard via the SPICE agent (needs workstation_desktop). OFF:
+# it bridges the anonymity workstation to the clipboard of an untrusted host.
+workstation_clipboard: false
+
+# Console/GUI password for the workstation user. Empty = the console is
+# diagnostic only. The real value comes from WORKSTATION_CONSOLE_PASSWORD in
+# .env via a 0600 vars file -- never put one here: this file is tracked. This
+# is the workstation's only way in besides the gateway. SSH stays key-only.
 workstation_console_password: ""
 
 # --- Kali toolset ------------------------------------------------------------
-# Which Kali function groups to install, WITHOUT the kali-tools- prefix. The
-# real value comes from KALI_TOOL_GROUPS in lab.conf, handed to Ansible through
-# the 0600 vars file by scripts/up.sh; an empty selection omits the variable
-# entirely, so this default is what decides that "no selection" means "no
-# tooling". Never put a build's selection here: this file is tracked.
+# Kali function groups WITHOUT the kali-tools- prefix. The real value comes
+# from KALI_TOOL_GROUPS in lab.conf via the 0600 vars file; an empty selection
+# omits the variable, so this default decides that "no selection" = no tooling.
 workstation_tools_groups: []
 
-# Every package that must never be installed on this host, because each one is a
-# VPN client (or the library half of one) and this host must hold no VPN
-# credentials at all.
+# Every package that must never be installed on this host: each is a VPN client
+# (or the library half of one), and this host must hold no VPN credentials.
 #
-# TWO consumers, deliberately not merged. desktop.yaml and tools.yaml PURGE
-# this list; scripts/verify.sh keeps its own copy and independently ASSERTS the
-# same set stayed absent. An assertion reading the same variable the removal
-# used would pass by construction. tests/vpn-watch-list.sh pins the two copies
-# to each other so they cannot drift apart unnoticed.
-#
-# Measured 2026-07-30: the kali-linux-headless/-default/-large/-everything
-# umbrellas pull openvpn, vpnc and vpnc-scripts (-everything adds
-# wireguard-tools). No kali-tools-* group pulls any of them, which is why the
-# toolset is built from those groups and the umbrellas are unselectable.
+# TWO consumers, deliberately not merged: this role PURGES the list, and
+# scripts/verify.sh keeps its own copy and independently ASSERTS the same set
+# stayed absent (an assertion reading the variable the removal used would pass
+# by construction). tests/vpn-watch-list.sh pins the two copies to each other.
 workstation_vpn_watch_list:
   # Mullvad's own client, which their repository carries for arm64. An apt pin
   # blocks it; this catches it arriving any other way.
@@ -95,9 +67,7 @@ workstation_vpn_watch_list:
   - network-manager-vpnc-gnome
   - network-manager-fortisslvpn
   - network-manager-fortisslvpn-gnome
-  # The clients those plugins drove, which outlive them. This guest was measured
-  # carrying working openvpn, openconnect, vpnc, pptp and strongswan binaries
-  # with every plugin already gone.
+  # The clients those plugins drove, which outlive them.
   - openvpn
   - openconnect
   - vpnc
@@ -105,11 +75,8 @@ workstation_vpn_watch_list:
   - pptp-linux
   - wireguard
   - wireguard-tools
-  # strongswan, named both as it is actually installed (the daemon packages) and
-  # as the metapackage, which is not installed today but would be on an image
-  # that pulls it. The two libstrongswan packages go too, not because a library
-  # can dial a tunnel, but because leaving them is the same orphaning mistake
-  # that left openvpn behind.
+  # strongswan as it is actually installed (the daemon packages) and as the
+  # metapackage an image might pull.
   - strongswan
   - strongswan-starter
   - strongswan-charon

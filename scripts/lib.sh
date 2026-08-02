@@ -12,13 +12,8 @@ ANSIBLE_DIR="${REPO_ROOT}/ansible"
 INVENTORY_FILE="${ANSIBLE_DIR}/inventory/hosts.generated.yaml"
 
 # --- Logging ----------------------------------------------------------------
-# All four write to stderr, so a script's stdout carries only its data. That
-# matters because callers capture that data: up.sh does
-# result="$(create-vm.sh ... | tail -1)" and create-vm.sh does
-# seed="$(make-seed.sh ... | tail -1)". When log/ok wrote to stdout, every
-# message from those scripts was swallowed by the command substitution and
-# never reached the terminal, including the reconcile telling you it was about
-# to restart a VM.
+# All four write to stderr so stdout carries only data; callers capture it
+# with $(...).
 _c() { printf '\033[%sm' "$1"; }
 log()  { printf '%s%s%s %s\n' "$(_c '1;34')" "==>" "$(_c 0)" "$*" >&2; }
 ok()   { printf '%s%s%s %s\n' "$(_c '1;32')" " ok" "$(_c 0)" "$*" >&2; }
@@ -26,25 +21,18 @@ warn() { printf '%s%s%s %s\n' "$(_c '1;33')" " ! " "$(_c 0)" "$*" >&2; }
 die()  { printf '%s%s%s %s\n' "$(_c '1;31')" "err" "$(_c 0)" "$*" >&2; exit 1; }
 
 # --- Config -----------------------------------------------------------------
-# Validate the lab.conf variables every script depends on. Split out from
-# load_config so tests can exercise it directly against fake values, without
-# needing a real lab.conf on disk.
+# Split out of load_config so tests can validate fake values directly.
 require_lab_conf_vars() {
   : "${LAB_PREFIX:?LAB_PREFIX missing in lab.conf}"
   : "${LAB_USER:?LAB_USER missing in lab.conf}"
   : "${LAB_SSH_KEY:?LAB_SSH_KEY missing in lab.conf}"
-  # parse_vm_entry falls back to these for any fleet entry that omits
-  # cpu=/ram=/disk=, so every script that touches the fleet needs them, not
-  # just create-vm.sh.
   : "${LAB_CPU:?LAB_CPU missing in lab.conf}"
   : "${LAB_RAM:?LAB_RAM missing in lab.conf}"
   : "${LAB_DISK_GB:?LAB_DISK_GB missing in lab.conf}"
 }
 
 load_config() {
-  # LAB_CONF overrides the config path. Only the unit tests set it, so they can
-  # exercise scripts that call load_config against a throwaway config instead of
-  # requiring (or worse, reading) the operator's real lab.conf.
+  # LAB_CONF is set only by the unit tests, to point at a throwaway config.
   local cfg="${LAB_CONF:-${REPO_ROOT}/lab.conf}"
   [[ -f "$cfg" ]] || die "lab.conf not found. Run: cp lab.conf.example lab.conf"
   # shellcheck disable=SC1090
@@ -56,20 +44,13 @@ load_config() {
 }
 
 # --- Secrets ----------------------------------------------------------------
-# Secrets live in .env, NOT in lab.conf. The split is deliberate: lab.conf is
-# build configuration you might paste into an issue (fleet, image URLs, sizes),
-# while .env holds only things that must never leave this machine -- console
-# passwords now, VPN credentials in Phase 2. Both are gitignored; only the
-# .example files are tracked.
+# Secrets live in .env (gitignored, 0600), never in lab.conf.
 ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env}"
 
-# Source .env if it exists. Absent is fine: every secret is optional, and an
-# unset one means "do not configure that feature" rather than a broken build.
+# Source .env if it exists. Absent is fine: every secret is optional.
 load_env() {
   [[ -f "$ENV_FILE" ]] || return 0
   local perms
-  # Secrets must not be world- or group-readable. Warn rather than die: refusing
-  # to build over a file mode would be worse than telling the operator.
   perms="$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo '')"
   case "$perms" in
     600|400) ;;
@@ -83,46 +64,25 @@ load_env() {
 }
 
 # Emit the secrets from .env as an Ansible vars document on stdout.
-#
-# Ansible gets these through `-e @file` with the file at 0600, never through
-# `-e key=value`: command-line arguments are visible to every user on the host in
-# `ps auxww`, so a password passed that way is effectively public while the
-# playbook runs.
-#
-# Values are written as single-quoted YAML scalars with every ' doubled, which is
-# how YAML escapes a quote inside one. That keeps a password containing quotes,
-# backslashes, '#', '$' or a leading space completely literal -- tests/secret-vars.sh
-# round-trips a deliberately hostile one through a real YAML parser.
-#
-# An unset or empty secret is OMITTED rather than emitted empty, so the roles'
-# group_vars defaults keep deciding what "no password" means.
+# Ansible gets these via `-e @file` with the file at 0600, never `-e key=value`:
+# command-line arguments are visible to every user in `ps auxww`.
+# Values are single-quoted YAML with every ' doubled; an unset secret is
+# OMITTED so the tracked group_vars defaults decide what "unset" means.
 render_secret_vars() {
   local name val esc
   for name in GATEWAY_CONSOLE_PASSWORD WORKSTATION_CONSOLE_PASSWORD MULLVAD_WG_CONFIG; do
     eval "val=\${${name}:-}"
     [[ -n "$val" ]] || continue
-    # UNQUOTED assignment on purpose: it makes \' a literal ' in both pattern and
-    # replacement, doubling each quote. Wrapping this in double quotes instead
-    # (esc="${val//\'/\'\'}") emits backslash-escaped quotes -- which YAML does
-    # not accept inside a single-quoted scalar -- and produces a file
-    # ansible-playbook rejects. tests/secret-vars.sh catches that regression.
+    # UNQUOTED on purpose: quoting this assignment emits backslash-escaped
+    # quotes, which YAML rejects (pinned by tests/secret-vars.sh).
     # shellcheck disable=SC2086
     esc=${val//\'/\'\'}
-    # Lowercase the env var name to get the Ansible var name.
     printf "%s: '%s'\n" "$(printf '%s' "$name" | tr 'A-Z' 'a-z')" "$esc"
   done
 }
 
-# Guarantee that a string destined for an `-e @file` vars document is one
-# ansible-playbook will actually accept. `render_secret_vars` (and up.sh's own
-# WireGuard block) both legitimately produce nothing when every secret is
-# unset -- that is valid, if empty, YAML -- but `ansible-playbook -e @file`
-# rejects a blank/whitespace-only file outright with "Invalid extra vars data
-# supplied ... could not be made into a dictionary". An operator who blanks
-# both console passwords and sets no MULLVAD_WG_CONFIG (the documented
-# "everything locked down" state) would otherwise hit that hard failure before
-# any task runs. Substitute an explicit empty mapping in that one case; any
-# non-blank content is passed through unchanged (plus a trailing newline).
+# ansible-playbook rejects a blank `-e @file` outright, but an all-secrets-unset
+# build legitimately produces one: substitute an explicit empty mapping then.
 vars_or_empty_mapping() {
   local content="${1:-}"
   if [[ -z "$(printf '%s' "$content" | tr -d '[:space:]')" ]]; then
@@ -132,10 +92,8 @@ vars_or_empty_mapping() {
   fi
 }
 
-# Generate a password: 24 chars from [A-Za-z0-9] (~142 bits). The charset is
-# restricted on purpose -- it is wide enough to be strong, and narrow enough that
-# the value can never trip a shell, a YAML parser or chpasswd on its way to the
-# guest.
+# 24 chars from [A-Za-z0-9] (~142 bits): strong, and can never trip a shell,
+# YAML parser or chpasswd on its way to the guest.
 gen_password() {
   openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c1-24
 }
@@ -146,9 +104,7 @@ vm_name() { echo "${LAB_PREFIX}-$1"; }
 # Private key path derived from the public key in lab.conf.
 priv_key() { echo "${LAB_SSH_KEY%.pub}"; }
 
-# Absolute path to the base disk image for a role. The gateway runs Debian (a
-# small, stable router); every other role runs Kali. Both live in IMAGES_DIR
-# after scripts/fetch-images.sh.
+# Base disk image for a role: the gateway runs Debian, everything else Kali.
 role_image() {
   case "$1" in
     gateway) echo "${IMAGES_DIR}/$(basename "$DEBIAN_IMG_URL")" ;;
@@ -156,25 +112,13 @@ role_image() {
   esac
 }
 
-# Host SSH forward port for a VM index. Only a dual-NIC VM ever gets one.
-#
-# The base is 2300, NOT the sibling lab's 2200: infra-utm-redteam-lab hands its
-# index-1 VM 127.0.0.1:2201, and if both fleets are up at once QEMU cannot bind
-# the same host port twice. The failure is nasty rather than loud -- whichever
-# forward wins, 'make ssh gateway' can land you on the lab's Kali attacker
-# instead of this gateway. Different base, no overlap, and an anonymous
-# engagement box never shares a socket with a deliberately vulnerable VM.
+# Host SSH forward port for a VM index; only a dual-NIC VM ever gets one.
+# Base 2300 keeps clear of other UTM fleets that may bind 22xx on this host.
 SSH_PORT_BASE=2300
 ssh_port_for() { echo "$(( SSH_PORT_BASE + ${1:?index required} ))"; }
 
-# NIC layout per role. The gateway keeps the two-NIC layout (NAT for internet +
-# the host SSH forward, plus the internal segment). Every other VM is
-# internal-only: a single host-mode NIC on the isolated segment, no NAT NIC at
-# all, so it has no path to the internet except through the gateway.
-#
-# This is the single source of truth for the repo's security property, and the
-# default is deliberately the safe one: a role nobody thought about gets
-# 'internal', never a NAT NIC.
+# NIC layout per role: the single source of truth for the security property.
+# The default is the safe one -- an unknown role gets 'internal', never NAT.
 nic_layout_for_role() {
   case "$1" in
     gateway) echo "dual" ;;
@@ -182,11 +126,8 @@ nic_layout_for_role() {
   esac
 }
 
-# Internal-segment IP for a role. The two named roles get fixed, memorable
-# addresses (gateway .1 = the router everything else routes through, workstation
-# .10); any additional internal-only VM falls back to 10.20.0.(10+idx). Keyed on
-# role rather than index so the workstation keeps the same address whatever
-# order the fleet is written in -- verify.sh and the ProxyJump both hardcode it.
+# Internal-segment IP per role. Keyed on role, not index, so the workstation
+# keeps its address whatever order the fleet is written in.
 internal_ip_for() {
   local role="${1:?role required}" idx="${2:?index required}"
   case "$role" in
@@ -197,13 +138,10 @@ internal_ip_for() {
 }
 
 # --- Network math -----------------------------------------------------------
-# Tiny IPv4 helpers behind preflight's host-only-subnet collision guard. bash
-# 3.2 safe: plain integer arithmetic, and every octet is forced base-10 (10#)
-# so a route-table entry like 010 never gets read as octal under set -e.
+# bash 3.2 safe; every octet forced base-10 (10#) so 010 is never read as octal.
 
-# Dotted-quad -> unsigned 32-bit integer on stdout. Emits nothing and returns 1
-# for anything that is not a.b.c.d with each octet 0-255 (so a MAC-formatted
-# gateway or a link#N row is rejected, not mis-parsed).
+# Dotted-quad -> unsigned 32-bit integer. Prints nothing and returns 1 for
+# anything that is not a.b.c.d with each octet 0-255.
 ip_to_int() {
   local o IFS=.
   # shellcheck disable=SC2086
@@ -216,9 +154,8 @@ ip_to_int() {
   echo "$(( (10#$1 << 24) | (10#$2 << 16) | (10#$3 << 8) | 10#$4 ))"
 }
 
-# cidr_contains <a.b.c.d/prefix> <a.b.c.d>: return 0 if the IP is inside the
-# CIDR, 1 if outside, 2 if either argument is malformed (callers treat 2 as
-# "cannot tell", never as a match).
+# cidr_contains <a.b.c.d/prefix> <a.b.c.d>: 0 inside, 1 outside, 2 malformed
+# (callers treat 2 as "cannot tell", never as a match).
 cidr_contains() {
   local cidr="${1:-}" ip="${2:-}" net prefix mask netint ipint
   net="${cidr%/*}"; prefix="${cidr#*/}"
@@ -231,37 +168,19 @@ cidr_contains() {
 }
 
 # --- Kali tool groups -------------------------------------------------------
-# KALI_TOOL_GROUPS in lab.conf names Kali function groups WITHOUT the
-# `kali-tools-` prefix ("web passwords"). The prefix is prepended by the
-# workstation role, never typed by the operator, and that asymmetry is a
-# security control rather than a convenience: measured on 2026-07-30, all 29
-# kali-tools-* groups pull no VPN package at all, while kali-linux-headless,
-# -default, -large and -everything all pull openvpn, vpnc and vpnc-scripts
-# (-everything adds wireguard-tools). Those four are the ones that would trip
-# verify.sh's no-VPN-client assertion, and none of them can be expressed here.
+# KALI_TOOL_GROUPS names groups WITHOUT the kali-tools- prefix; the workstation
+# role prepends it. That makes the kali-linux-* umbrellas inexpressible, which
+# is deliberate: they pull VPN clients onto the one host that must never hold
+# one, while no kali-tools-* group does.
 #
-# Prints one validated, deduplicated group name per line on stdout, first-seen
-# order, and prints NOTHING AT ALL for an empty selection -- not a blank line.
-# This repo has already shipped a helper that printed a bare newline on zero
-# matches, which made "nothing matched" indistinguishable from one empty result
-# and left every `while read` consumer looping once on an empty value.
-#
-# Dies on anything else, naming the value. The charset is not cosmetic: the name
-# ends up on an apt command line inside the guest.
+# Prints one validated, deduplicated group per line, and NOTHING AT ALL for an
+# empty selection (not a blank line). Dies on an invalid name: it ends up on an
+# apt command line inside the guest.
 parse_tool_groups() {
   local raw="${1-${KALI_TOOL_GROUPS:-}}" g seen=" " noglob_was_on
-  # Unquoted on purpose: the selection is a space-separated list and this is the
-  # word splitting that reads it. Pathname expansion (*, ?, [...]) must be
-  # disabled so these characters are not silently expanded to directory names
-  # before the charset guard rejects them. Save and restore the caller's noglob
-  # setting: some callers may rely on globbing being on.
-  #
-  # `local IFS` covers the other half of word splitting: without it, a caller
-  # that has set IFS=, (a CSV parser elsewhere in the same process, for
-  # instance) makes `for g in $raw` split on commas only, so a space-separated
-  # selection like "web passwords" arrives as one token and dies on the whole
-  # string. Scoped to the function body only; the caller's IFS is untouched
-  # once parse_tool_groups returns.
+  # Unquoted expansion is the word splitting that reads the list; noglob keeps
+  # * ? [ ] from expanding to filenames before the charset guard sees them, and
+  # a local default IFS keeps a caller's exotic IFS from breaking the split.
   local IFS=$' \t\n'
   noglob_was_on=$(set -o | grep -c "^noglob.*on" || true)
   set -f
@@ -279,15 +198,10 @@ parse_tool_groups() {
   if (( ! noglob_was_on )); then set +f; fi
 }
 
-# Render the validated selection as the single Ansible variable the workstation
-# role consumes. It rides the same 0600 vars file as the secrets for one reason
-# only: that file is the only channel up.sh has to ansible-playbook, and
-# `-e key=value` is banned repo-wide because arguments are visible in `ps auxww`.
-#
-# An empty selection emits NOTHING, so the tracked group_vars default keeps
-# deciding what "no groups" means -- the same rule as an unset secret. Group
-# names are [a-z0-9-] by the time they get here, so a plain YAML flow list needs
-# no quoting.
+# Render the validated selection as the Ansible variable the workstation role
+# consumes. Rides the same 0600 vars file as the secrets (`-e key=value` is
+# banned repo-wide); an empty selection emits nothing so the tracked
+# group_vars default keeps deciding what "no groups" means.
 render_tool_groups_var() {
   local groups line out=""
   groups="$(parse_tool_groups "$@")" || return 1
@@ -299,42 +213,37 @@ render_tool_groups_var() {
   printf 'workstation_tools_groups: [%s]\n' "$out"
 }
 
+# Render a lab.conf yes/no switch as an Ansible bool. Empty emits NOTHING, so
+# the tracked group_vars default decides; anything unrecognised dies.
+render_bool_var() {
+  local name="${1:?var name required}" raw="${2-}"
+  case "$(printf '%s' "$raw" | tr 'A-Z' 'a-z')" in
+    "")               return 0 ;;
+    yes|true|1|on)    printf '%s: true\n'  "$name" ;;
+    no|false|0|off)   printf '%s: false\n' "$name" ;;
+    *) die "${name}: expected yes or no in lab.conf, got '${raw}'." ;;
+  esac
+}
+
 # --- SSH --------------------------------------------------------------------
-# Host-key options every connection in this repo uses. These VMs are disposable
-# by design -- 'make destroy && make up' hands the workstation a brand new host
-# key -- so pinning them would break on the next rebuild, and /dev/null keeps
-# that churn out of the operator's real known_hosts.
-#
-# LogLevel=ERROR is part of the same decision: discarding known_hosts means every
-# single connection prints "Warning: Permanently added ...". verify.sh makes
-# dozens of hops per run, and a leak FAIL buried in forty identical warnings is a
-# finding nobody reads. Errors and fatals still print.
+# The VMs are disposable, so host keys are not pinned and known_hosts is
+# /dev/null. LogLevel=ERROR suppresses the "Permanently added" warning that
+# would otherwise print on every one of verify.sh's dozens of hops.
 SSH_HOSTKEY_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
 # The ProxyCommand that reaches an internal-only VM through the gateway.
-# Usage: ssh -o ProxyCommand="$(ssh_jump_proxycommand "$gw_port")" ...
-#
-# It MUST be a ProxyCommand with the options spelled out INSIDE it, never a bare
-# '-o ProxyJump=user@host:port'. Per ssh_config(5), directives given on the
-# command line apply to the destination and NOT to a jump host: a ProxyJump hop
-# therefore silently falls back to StrictHostKeyChecking=ask, and anywhere there
-# is no tty (BatchMode, Ansible, verify.sh, up.sh's readiness wait) it dies with
-# "Host key verification failed" while the guest is up and answering fine. That
-# cost a whole 420s build timeout once; tests/ssh-jump.sh pins it.
+# MUST be a ProxyCommand with the options spelled out inside it, never a bare
+# ProxyJump: command-line ssh options do not apply to a jump hop, so the hop
+# would fall back to StrictHostKeyChecking=ask and die wherever there is no
+# tty (Ansible, verify.sh, the readiness wait). Pinned by tests/ssh-jump.sh.
 ssh_jump_proxycommand() {
   local gw_port="${1:?gateway port required}"
   echo "ssh -W %h:%p -i $(priv_key) ${SSH_HOSTKEY_OPTS[*]} -o ConnectTimeout=10 -p ${gw_port} ${LAB_USER}@127.0.0.1"
 }
 
-# Parse one LAB_VMS entry into VM_SHORT / VM_ROLE / VM_CPU / VM_RAM / VM_DISK.
-#
-# Entry syntax: "name:role [cpu=N] [ram=MiB] [disk=GB]"
-# The resource fields are optional and order-free; each one falls back to the
-# lab-wide LAB_CPU / LAB_RAM / LAB_DISK_GB. Omitting ":role" makes the role the
-# same as the name.
-#
-# This is the ONLY place that knows the fleet syntax. Bash 3.2 has no
-# associative arrays, so the result comes back as globals.
+# Parse one LAB_VMS entry ("name:role [cpu=N] [ram=MiB] [disk=GB]") into
+# VM_SHORT / VM_ROLE / VM_CPU / VM_RAM / VM_DISK globals (bash 3.2: no
+# associative arrays). The only place that knows the fleet syntax.
 parse_vm_entry() {
   local entry="${1:?entry required}"
   local spec fields field key val
@@ -365,8 +274,6 @@ parse_vm_entry() {
       || die "LAB_VMS entry '${entry}': '${field}' is not key=value. Valid keys: cpu, ram, disk."
     key="${field%%=*}"
     val="${field#*=}"
-    # Check the key before the value, so 'mem=abc' complains about 'mem'
-    # rather than about the number.
     case "$key" in
       cpu|ram|disk) ;;
       *) die "LAB_VMS entry '${entry}': unknown field '${key}'. Valid keys: cpu, ram, disk." ;;
@@ -397,20 +304,17 @@ find_qemu_img() {
   return 1
 }
 
-# Virtual size of a disk image in bytes, per qemu-img. Prints nothing if the
-# size cannot be read, so callers must handle an empty result.
+# Virtual size of a disk image in bytes. Prints nothing if it cannot be read,
+# so callers must handle an empty result.
 disk_bytes() {
   local img="${1:?image path required}" qi
   qi="$(find_qemu_img)" || return 0
-  # qemu-img can fail (missing, unreadable or corrupt image) while sed and
-  # head still succeed on empty input; under pipefail that failure becomes
-  # the pipeline's status and would otherwise kill the caller under set -e.
+  # `|| true`: under pipefail a failing qemu-img would kill the caller.
   "$qi" info "$img" 2>/dev/null | sed -n 's/.*(\([0-9][0-9]*\) bytes).*/\1/p' | head -1 || true
 }
 
 # --- utmctl -----------------------------------------------------------------
-# utmctl ships inside UTM.app and is usually NOT on PATH. Resolve it once so
-# every script can call "$UTMCTL" and work whether or not you added it to PATH.
+# utmctl ships inside UTM.app and is usually not on PATH.
 if command -v utmctl >/dev/null 2>&1; then
   UTMCTL="$(command -v utmctl)"
 else
@@ -422,15 +326,9 @@ vm_exists() {
   "$UTMCTL" list 2>/dev/null | grep -q " ${1}\$"
 }
 
-# Stop a VM and wait for it to really be stopped. utmctl stop asks the guest to
-# shut down, which is not instant, and passes through intermediate statuses
-# (e.g. "stopping") before landing on "stopped". Waits for exactly "stopped",
-# not merely "not started", so a caller that immediately reconfigures the VM
-# never races a UTM that is still mid-shutdown. Returns early (success) if the
-# status is empty, meaning the VM does not exist, so a caller like destroy.sh
-# does not burn the full timeout on a VM that is already gone. Returns 1 if it
-# is still not stopped after the timeout, so callers can decide whether that
-# is fatal.
+# Stop a VM and wait until its status is really "stopped" (utmctl stop asks the
+# guest and passes through "stopping" first). Empty status = VM gone = success.
+# Returns 1 on timeout so callers decide whether that is fatal.
 # Usage: stop_vm_and_wait <name> [timeout_seconds, default 60]
 stop_vm_and_wait() {
   local name="${1:?vm name required}" timeout="${2:-60}" waited=0 status
@@ -448,15 +346,12 @@ stop_vm_and_wait() {
   return 1
 }
 
-# UTM's status for a VM ("started", "stopped", "paused", ...), or empty if the
-# VM does not exist.
+# UTM's status for a VM ("started", "stopped", ...), or empty if it does not exist.
 vm_status() {
   "$UTMCTL" status "${1:?vm name required}" 2>/dev/null || true
 }
 
-# Start a VM through utmctl, falling back to AppleScript on the odd UTM build
-# where utmctl is unhappy. Both create-vm.sh paths (new VM, reconciled VM) route
-# through here so the start command lives in exactly one place.
+# Start a VM, falling back to AppleScript on UTM builds where utmctl is unhappy.
 start_vm() {
   local name="${1:?vm name required}"
   "$UTMCTL" start "$name" >/dev/null 2>&1 \
