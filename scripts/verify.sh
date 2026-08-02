@@ -542,9 +542,20 @@ while read -r short role vm_idx; do
       # suite would notice.
       if [[ "$role" == "workstation" ]]; then
         # parse_tool_groups dies on an invalid selection, and it dies inside
-        # THIS command substitution's subshell -- so without the explicit
-        # failure branch the empty output would read as "no groups configured"
-        # and print green. That is exactly the silence this suite refuses.
+        # THIS command substitution's subshell. The `if !` is what turns that
+        # into a scored FAIL that the rest of the suite survives.
+        #
+        # Mutation evidence, and it did not do what was predicted: replacing
+        # this with a bare `groups_list="$(parse_tool_groups || true)"` was
+        # expected to print green over an invalid config. Measured under bash
+        # 3.2, it hard-aborts the whole run instead, because `exit` inside a
+        # command substitution kills that subshell before `|| true` on the
+        # outer assignment can ever run. Worse than predicted, not better:
+        # every later check, kill-switch included, is skipped in silence.
+        #
+        # The other mutation, breaking the fact rather than the guard: removing
+        # kali-tools-detect on the guest made `make verify` fail through the
+        # "is missing tool group(s)" branch below and exit non-zero.
         if ! groups_list="$(parse_tool_groups)"; then
           note_fail "KALI_TOOL_GROUPS in lab.conf is invalid (see the error above); the toolset on ${short} cannot be asserted"
         else

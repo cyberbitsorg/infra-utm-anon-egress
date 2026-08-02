@@ -8,6 +8,16 @@
 # role's purge list but not to verify's watch list is a package nobody asserts;
 # one added to verify but not the role is a FAIL nothing removes. This test
 # pins them to each other without merging them.
+#
+# Mutation evidence, both directions, applied and reverted:
+#
+#   - Delete `- openvpn` from the group_vars copy: fails on the drift diff
+#     ("< openvpn") AND on the named-package assertion below.
+#   - Add `- something-else` to the group_vars copy: fails on the drift diff
+#     ("> something-else").
+#
+# The count floor below covers the third direction, which a diff alone cannot
+# see: both copies shrinking together would otherwise compare equal and pass.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

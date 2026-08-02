@@ -11,6 +11,23 @@
 #      what makes kali-linux-large inexpressible -- it and its three siblings
 #      are the only Kali metapackages measured to drag openvpn/vpnc onto a host
 #      that must never hold a VPN client.
+#
+# Mutation evidence, so this file is not just green by default. Each mutation
+# was applied, run, and reverted; each failure arrived through the assertion
+# that names the behaviour, never through a generic abort:
+#
+#   - Weaken the charset test to `[[ -n "$g" ]]`: every injection case below
+#     fails ("web; rm -rf /", "web&&reboot", "$(id)", "web/../../etc", "Web",
+#     "-web", "web.passwords", "web_passwords"), each on its own
+#     "should have been rejected" line.
+#   - Delete the `case "$g" in kali-*)` block: all four umbrella cases fail,
+#     plus the render_tool_groups_var one.
+#   - Remove the `set -f` handling: the glob cases below fail with the expanded
+#     name visible ("got: ansible"), which is what proves the old order was
+#     accept-then-die rather than a clean rejection. That is the bug this file
+#     was extended to catch: those assertions only bite from the repo root,
+#     where "ansible", "docs", "scripts" and "tests" are real directories whose
+#     names pass the charset rule.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # load_config is never called here, so no lab.conf and no fake vars are needed.

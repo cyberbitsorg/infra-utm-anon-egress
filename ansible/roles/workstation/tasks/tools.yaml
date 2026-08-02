@@ -56,6 +56,11 @@
   # prints nothing, so the exit status is not the signal -- a real group has a
   # "Candidate:" line with a version. Without this check a typo installs
   # nothing, apt reports success, and the build is green with no tools.
+  #
+  # Mutation evidence: with this task deleted, KALI_TOOL_GROUPS="detect
+  # nosuchgroup" failed inside the install task instead, with a raw apt error
+  # ("No package matching 'kali-tools-nosuchgroup' is available"). That is the
+  # diagnosis this task exists to replace. Restored, verified green.
   ansible.builtin.fail:
     msg: >-
       kali-tools-{{ item.item }} does not exist in Kali's archive. Fix
@@ -159,6 +164,12 @@
   # purge` on its own command line, and apt always echoes back what it was
   # asked to purge with a "Purg " line, so every member gets one. If any member
   # is missing from anon_would_remove, the parse itself is broken, not merely quiet.
+  #
+  # Mutation evidence: installed vpnc-scripts on the workstation (watch-listed,
+  # no reverse dependencies on this image), then broke the regex above to
+  # '^NEVERMATCH '. `make configure` stopped here, on this task's own message,
+  # and the real purge below was never reached; vpnc-scripts was still
+  # installed afterwards. Regex restored, rerun, purge ran for real.
   ansible.builtin.fail:
     msg: >-
       apt-get -s purge {{ anon_vpn_present | join(' ') }} did not report removing
@@ -179,6 +190,14 @@
   # actually named every package that was asked to be purged, so "no
   # collateral" here means the parse worked AND found none, never "the parse
   # found nothing at all."
+  #
+  # Mutation evidence: `bash` was useless as a test case (no apt-level
+  # dependents on this image), so libosip2-15t64 was used instead, a library
+  # sentrypeer depends on and that kali-tools-detect pulls in. Added to the
+  # watch list, `make configure` stopped here naming exactly "sentrypeer
+  # kali-tools-detect" as the collateral, changed=0, nothing purged. That run
+  # is also what exposed the original '^Remv ' regex, which never matched the
+  # 'Purg ' lines apt emits for directly named packages, and so could not fire.
   vars:
     collateral: "{{ anon_would_remove | difference(workstation_vpn_watch_list) }}"
   ansible.builtin.fail:

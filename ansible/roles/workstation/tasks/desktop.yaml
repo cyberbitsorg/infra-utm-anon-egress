@@ -230,6 +230,12 @@
 # The purge there is simulated first and refuses to proceed if it would remove
 # anything outside workstation_vpn_watch_list, which a purge that could take
 # the desktop or the tools with it must be able to do.
+#
+# This is not hypothetical. While testing the guard, a package with real
+# dependents was put on the watch list and the version of this task that used
+# to live here attempted the removal for real, before tools.yaml was reached.
+# In that session only apt's own refusal to remove an essential package stopped
+# it, and that protection does not extend to anything else on the list.
 
 - name: Read the current default systemd target
   ansible.builtin.command: systemctl get-default

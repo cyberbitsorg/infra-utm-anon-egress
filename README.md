@@ -676,7 +676,7 @@ came within one change of doing so:
 | Change `nftables.conf.j2` or `verify.sh` and skip the negative control | A too-permissive forward rule passes every guest-side probe. This is not hypothetical: it happened, and only `tcpdump -Q out` on the WAN caught it. The recipe is in "What `make verify` proves". |
 | Unpack Mullvad's config bundle and leave it at the default mode | Hundreds of private keys world-readable. `make preflight` and the build now warn, but the warning scrolls past. Run `chmod 600 secrets/*.conf`. |
 | `apt install` a VPN client on the workstation | The check enumerates known clients plus any `network-manager-*` plugin. A client under an unfamiliar name is **not** caught. The workstation must never hold VPN credentials. |
-| Trust "the tests pass" | Tests can pass without testing anything. Ask for the mutation evidence instead: *break the guard and show me the test fails.* See `docs/mutation-evidence.md`. |
+| Trust "the tests pass" | Tests can pass without testing anything. Ask for the mutation evidence instead: *break the guard and show me the test fails.* Each test under `tests/` says in its header what breaks it. |
 | Reuse the workstation across engagements | It is disposable by design. `make destroy && make up` gives a fresh Kali and a fresh entry/exit pair. |
 | Run the lab while a host VPN is up | The vmnet bridge can hijack a route that falls inside its subnet. `make preflight` refuses; see "Host-only subnet". |
 
@@ -705,9 +705,12 @@ run, and a genuinely closed gateway all produce the same silence.
 So when you add or change a guard: delete it, run the covering test, and confirm
 the test fails **through the assertion that names that behaviour**, not through
 an unrelated crash. Then put it back. It costs a minute and it is the only thing
-that distinguishes a test that runs from a test that bites. Record the
-evidence with the change: `docs/mutation-evidence.md` is where it lives so it
-survives merge (`.superpowers/` and `docs/superpowers/` are both gitignored).
+that distinguishes a test that runs from a test that bites. Record the evidence
+**next to the guard**: a comment in the covering test, or beside the task in the
+role, saying what to break and which assertion catches it. Every test under
+`tests/` and every guard in `ansible/roles/workstation/tasks/tools.yaml` carries
+one. A separate evidence document was tried and abandoned: nothing re-runs it,
+so it starts describing code that has since changed.
 
 This is not defensive boilerplate. All of the following shipped looking correct
 during development, and mutation is what exposed each one:

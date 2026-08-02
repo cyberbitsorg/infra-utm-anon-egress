@@ -123,6 +123,10 @@ echo "pkg_fully_installed vs vpn_pkg_present, opposite polarity:"
 # "did this finish installing", not "did something of it land on disk" -- an
 # apt run that died halfway through the tunnel leaves a group in exactly
 # half-configured, and that must read as MISSING, not present.
+#
+# Mutation: widen pkg_fully_installed to accept half-configured as well. The
+# first assertion below fails by name ("half-configured must not count as fully
+# installed"), not through a generic abort. Reverted after measuring.
 dump_half="kali-tools-web half-configured"
 pkg_fully_installed "$dump_half" "kali-tools-web" \
   && note "half-configured must not count as fully installed"
