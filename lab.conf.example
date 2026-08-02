@@ -93,6 +93,32 @@ KALI_IMG_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/kali-linux
 KALI_SHA_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/SHA256SUMS"
 KALI_IMG_FILE="kali-genericcloud-arm64.raw"
 
+# --- Kali toolset -----------------------------------------------------------
+# Which Kali function groups to install on the workstation, space separated,
+# WITHOUT the kali-tools- prefix. Empty (the default) means no tooling: a bare
+# Kali with the desktop and Mullvad Browser.
+#
+# Every package here is downloaded through the gateway's multihop tunnel, which
+# is the whole point of installing them this way and also the reason it is slow:
+# a group is 2 to 650 packages, and 300 to 650 for the general-purpose groups.
+# Measured sizes: gpu 2, detect 11, top10 301, passwords 279, web 609,
+# vulnerability 650.
+#
+# Available groups (the part after "kali-tools-"): 802-11, bluetooth,
+# crypto-stego, database, detect, exploitation, forensics, fuzzing, gpu,
+# hardware, identify, information-gathering, passwords, post-exploitation,
+# protect, recover, reporting, respond, reverse-engineering, rfid, sdr,
+# sniffing-spoofing, social-engineering, top10, voip, vulnerability, web,
+# windows-resources, wireless.
+#
+# The kali-linux-* umbrella packages (headless, default, large, everything) are
+# deliberately NOT selectable: all four pull openvpn and vpnc onto a host that
+# must never hold a VPN client, and `make verify` would fail on them.
+#
+# sdr, rfid, bluetooth, hardware and 802-11 install fine but have no device to
+# talk to in a VM with one virtual NIC.
+KALI_TOOL_GROUPS=""
+
 # --- VM fleet ---------------------------------------------------------------
 # Each entry: "name:role [cpu=N] [ram=MiB] [disk=GB]"
 #

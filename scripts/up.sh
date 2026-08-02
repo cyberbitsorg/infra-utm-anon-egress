@@ -108,6 +108,19 @@ mullvad_endpoint_port: '$(wg_endpoint_port "$wg_src")'"
     log "Sanitised WireGuard config staged (endpoint $(wg_endpoint_ip "$wg_src"):$(wg_endpoint_port "$wg_src"))"
   fi
 
+  # Not a secret, but it rides the same 0600 file because that file is the only
+  # channel this script has to ansible-playbook. Validation is repeated here
+  # rather than trusted from preflight for the same reason the
+  # MULLVAD_WG_CONFIG/MULLVAD_EXIT guard above is repeated: `make configure`
+  # never runs preflight.
+  local tool_groups_var
+  tool_groups_var="$(render_tool_groups_var)"
+  if [[ -n "$tool_groups_var" ]]; then
+    vars_content="${vars_content}
+${tool_groups_var}"
+    log "Kali tool groups: $(parse_tool_groups | tr '\n' ' ')"
+  fi
+
   vars_or_empty_mapping "$vars_content" > "$vars_file"
 
   log "Running Ansible playbook"

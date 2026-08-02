@@ -174,6 +174,19 @@ vpn_pkg_present() {
   [[ -n "$s" && "$s" != "not-installed" && "$s" != "config-files" ]]
 }
 
+# pkg_fully_installed <dump> <package>: true ONLY if <package>'s status is the
+# single steady-state string "installed". The opposite polarity from
+# vpn_pkg_present on purpose: there, "present" means bad and any non-absent
+# status (unpacked, half-configured, ...) must fail safe by counting as
+# present. Here, "installed" means good, and those same partial states are
+# exactly what an apt run that died halfway through the tunnel leaves behind --
+# so accepting anything short of "installed" would fail OPEN, printing green
+# over a tool group that only half-landed. Used to assert a requested Kali
+# tool group actually finished installing, never to scan for a VPN client.
+pkg_fully_installed() {
+  [[ "$(vpn_pkg_status "$1" "$2")" == "installed" ]]
+}
+
 # vpn_nm_plugins <dump>: prints every INSTALLED network-manager-* package in
 # <dump> that is not one of the three the desktop legitimately needs.
 #
@@ -470,8 +483,16 @@ while read -r short role vm_idx; do
 
   vpn_scan="$(on_ws "$ip" "dpkg-query -W -f='\${Package} \${db:Status-Status}\n' 2>/dev/null; echo __rc=\$?; echo __vpnscan=done" \
       2>/dev/null | tr -d '\r' || true)"
+  # The tool-group assertion (3b, below) is nested inside this branch because it
+  # reuses vpn_dump, which only exists once the dump is proven to have run and
+  # to have really read the status database. Every note_fail in this branch's
+  # failure paths is therefore followed by an explicit note, for a workstation,
+  # that the toolset could not be asserted either -- without it, a transport
+  # failure here would print one FAIL for the VPN scan and total silence for
+  # the toolset, and silence must never be scored as security.
   if ! grep -q '__vpnscan=done' <<<"$vpn_scan"; then
     note_fail "the VPN-client scan did not run on ${short}; cannot assert credentials are gateway-only"
+    [[ "$role" == "workstation" ]] && note_fail "the toolset on ${short} cannot be asserted either: it depends on the same scan"
   else
     vpn_rc="$(sed -n 's/^__rc=\([0-9][0-9]*\)$/\1/p' <<<"$vpn_scan" | tail -1 || true)"
     # grep -v exits 1, not 0, when every line matches the exclusion (i.e. the
@@ -481,8 +502,10 @@ while read -r short role vm_idx; do
     vpn_dump="$(grep -vE '^__rc=[0-9]+$|^__vpnscan=done$' <<<"$vpn_scan" || true)"
     if [[ "$vpn_rc" != "0" ]]; then
       note_fail "the VPN-client scan on ${short} did not complete (dpkg-query exited ${vpn_rc:-unknown} instead of 0); credential-isolation cannot be asserted"
+      [[ "$role" == "workstation" ]] && note_fail "the toolset on ${short} cannot be asserted either: it depends on the same scan"
     elif ! vpn_pkg_present "$vpn_dump" "base-files"; then
       note_fail "the VPN-client scan on ${short} did not observe its own canary package (base-files) as installed; dpkg-query may not have actually read the status database, so credential-isolation cannot be asserted"
+      [[ "$role" == "workstation" ]] && note_fail "the toolset on ${short} cannot be asserted either: it depends on the same scan"
     else
       vpn_found=""
       for pkg in $vpn_watch_list; do
@@ -503,6 +526,43 @@ while read -r short role vm_idx; do
         note_fail "${short} has VPN client package(s) installed, which an internal-only host must never have: ${vpn_found}"
       else
         ok "${short} has no VPN client installed: none of the named clients, and no network-manager-* plugin beyond the desktop's own (credentials stay on the gateway)"
+      fi
+
+      # 3b. Every tool group KALI_TOOL_GROUPS asked for is actually installed.
+      #
+      # This reuses the dump above rather than making a second round trip, and
+      # that reuse is what makes it trustworthy: the dump has already been
+      # proven to have run (dpkg-query exited 0) and to have really read the
+      # status database (the base-files canary). A fresh query here could come
+      # back empty from a dead connection and read as "nothing installed".
+      #
+      # It exists because an apt run that died halfway through the tunnel leaves
+      # a build that looks entirely successful: Ansible reported ok, the
+      # workstation boots, and the tools are simply absent. Nothing else in this
+      # suite would notice.
+      if [[ "$role" == "workstation" ]]; then
+        # parse_tool_groups dies on an invalid selection, and it dies inside
+        # THIS command substitution's subshell -- so without the explicit
+        # failure branch the empty output would read as "no groups configured"
+        # and print green. That is exactly the silence this suite refuses.
+        if ! groups_list="$(parse_tool_groups)"; then
+          note_fail "KALI_TOOL_GROUPS in lab.conf is invalid (see the error above); the toolset on ${short} cannot be asserted"
+        else
+          groups_missing=""; groups_seen=0
+          while IFS= read -r grp; do
+            [[ -n "$grp" ]] || continue
+            groups_seen=$((groups_seen + 1))
+            pkg_fully_installed "$vpn_dump" "kali-tools-${grp}" \
+              || groups_missing="${groups_missing}kali-tools-${grp} "
+          done <<<"$groups_list"
+          if (( groups_seen == 0 )); then
+            ok "${short} has no tool groups configured (KALI_TOOL_GROUPS is empty)"
+          elif [[ -n "$groups_missing" ]]; then
+            note_fail "${short} is missing tool group(s) that KALI_TOOL_GROUPS asked for: ${groups_missing% } (the apt run did not finish, or the selection changed without a re-run of 'make configure')"
+          else
+            ok "${short} has all ${groups_seen} configured tool group(s) installed"
+          fi
+        fi
       fi
     fi
   fi

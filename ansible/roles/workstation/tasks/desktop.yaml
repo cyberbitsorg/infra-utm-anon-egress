@@ -216,70 +216,20 @@
     install_recommends: true
     update_cache: true
 
-- name: Purge the VPN plugins and every client behind them
-  # A GUI "add a VPN connection" wizard on the one host that must never hold VPN
-  # credentials is an invitation to break the design by hand. The plugins are
-  # Recommends of the desktop, so purging them leaves the desktop fully intact.
-  #
-  # THE SECOND HALF OF THIS LIST IS THE PART THAT IS EASY TO GET WRONG. Removing
-  # a NetworkManager plugin does NOT remove the client it depended on: apt leaves
-  # the orphan installed unless someone runs autoremove. That is not theoretical
-  # -- with every plugin below already purged, this guest was measured still
-  # carrying working /usr/sbin/openvpn, openconnect, vpnc and pptp binaries plus
-  # the strongswan IKE daemon. Purging the GUI while leaving the client behind
-  # removes the convenience and keeps the capability, which is the wrong half.
-  #
-  # Every name here was checked before being added, and none of them cascades:
-  # `apt-get -s purge` on the whole set removes exactly these ten packages and
-  # nothing else -- no kali-desktop-xfce, no lightdm, no network-manager, no
-  # Mullvad Browser. Re-run that simulation before adding to this list; if a
-  # package ever turns out to be load-bearing for XFCE, leave it installed and
-  # document it rather than breaking the desktop.
-  #
-  # Deliberately NOT `autoremove: true`. That would also drop ~30 unrelated
-  # orphans (easy-rsa, opensc, pcscd, libnl-3-200, assorted python3 modules) and
-  # make this task's effect depend on whatever else happens to be orphaned at the
-  # time -- a far larger blast radius than the problem warrants, and one that
-  # changes between runs. Named packages only.
-  #
-  # Idempotent by construction: `state: absent` on an already-absent package is a
-  # no-op, so this reports no change on every run after the first.
-  # scripts/verify.sh asserts this same set stays absent -- and, unlike this
-  # list, matches network-manager-* by pattern, so a plugin a future Kali adds is
-  # caught even though nothing here purged it.
-  ansible.builtin.apt:
-    name:
-      # The NetworkManager VPN plugins the desktop recommends.
-      - network-manager-openvpn
-      - network-manager-openvpn-gnome
-      - network-manager-pptp
-      - network-manager-pptp-gnome
-      - network-manager-l2tp
-      - network-manager-l2tp-gnome
-      - network-manager-openconnect
-      - network-manager-openconnect-gnome
-      - network-manager-vpnc
-      - network-manager-vpnc-gnome
-      - network-manager-fortisslvpn
-      - network-manager-fortisslvpn-gnome
-      # The clients those plugins drove, which outlive them.
-      - openvpn
-      - openconnect
-      - vpnc
-      - vpnc-scripts
-      - pptp-linux
-      # strongswan, named as it is actually installed: Kali pulls the daemon
-      # packages, not the `strongswan` metapackage. The two libstrongswan
-      # packages go too -- not because a library can dial a tunnel, but because
-      # leaving them is the same orphaning mistake that left openvpn behind.
-      - strongswan-starter
-      - strongswan-charon
-      - strongswan-libcharon
-      - libcharon-extauth-plugins
-      - libstrongswan
-      - libstrongswan-standard-plugins
-    state: absent
-    purge: true
+# The purge of workstation_vpn_watch_list used to live here, unsimulated and
+# ahead of tools.yaml's guard. That ran the destructive purge before anything
+# had checked whether it would take a requested tool group down with it:
+# main.yaml includes this file before tools.yaml, so the simulate-first guard
+# tools.yaml exists to provide never got a chance to run first.
+#
+# It moved to tools.yaml's "List what is actually installed" / "Name the VPN
+# packages" / "Simulate the purge" / "Refuse a purge that would take the
+# requested tools with it" / "Purge the VPN client packages" sequence, which
+# has no `when:` tying it to group selection or to the desktop -- it runs on
+# every `make configure` regardless -- so it already covers this exact list.
+# The purge there is simulated first and refuses to proceed if it would remove
+# anything outside workstation_vpn_watch_list, which a purge that could take
+# the desktop or the tools with it must be able to do.
 
 - name: Read the current default systemd target
   ansible.builtin.command: systemctl get-default

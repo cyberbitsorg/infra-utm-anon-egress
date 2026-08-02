@@ -127,6 +127,17 @@ else
   warn "Neither MULLVAD_EXIT nor MULLVAD_WG_CONFIG is set in .env: the gateway will have no tunnel and the workstation no egress."
 fi
 
+log "Checking Kali tool groups"
+# parse_tool_groups dies on an invalid name, which is the point of doing this
+# here: a bad group name should stop the build before a VM is created, not
+# thirty minutes later inside an apt run over the tunnel.
+tool_groups="$(parse_tool_groups)"
+if [[ -n "$tool_groups" ]]; then
+  ok "Tool groups: $(printf '%s' "$tool_groups" | tr '\n' ' ')"
+else
+  ok "No Kali tool groups selected: the workstation gets the desktop and browser only"
+fi
+
 # The internal segment rides an Apple vmnet host-only switch whose OWN subnet is
 # assigned by macOS (com.apple.vmnet.plist, Host_Net_Address), independent of
 # LAB_SEGMENT. If that subnet overlaps a route the host already has -- most
