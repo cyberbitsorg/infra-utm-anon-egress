@@ -23,13 +23,14 @@ cd "$(dirname "$0")/.."
 eval "$(awk '/^vpn_pkg_status\(\)/,/^}$/' scripts/verify.sh)"
 eval "$(awk '/^vpn_pkg_present\(\)/,/^}$/' scripts/verify.sh)"
 eval "$(awk '/^vpn_nm_plugins\(\)/,/^}$/' scripts/verify.sh)"
+eval "$(awk '/^pkg_fully_installed\(\)/,/^}$/' scripts/verify.sh)"
 
 fail=0
 note() { echo "  FAIL $1"; fail=1; }
 
 # If a rename ever makes the extraction above find nothing, every assertion
 # below would error rather than pass -- but say so plainly instead.
-for fn in vpn_pkg_status vpn_pkg_present vpn_nm_plugins; do
+for fn in vpn_pkg_status vpn_pkg_present vpn_nm_plugins pkg_fully_installed; do
   declare -f "$fn" >/dev/null 2>&1 \
     || { echo "  FAIL ${fn} was not extracted from scripts/verify.sh"; exit 1; }
 done
@@ -116,6 +117,23 @@ network-manager-l2tp installed" | tr '\n' ' ')"
 # the caller treats "no output" as clean, and a non-zero exit here would abort
 # the whole verify run instead.
 [[ -z "$(vpn_nm_plugins "")" ]] || note "an empty dump must yield no plugins"
+
+echo "pkg_fully_installed vs vpn_pkg_present, opposite polarity:"
+# The contrast this test exists for. verify.sh's tool-group assertion asks
+# "did this finish installing", not "did something of it land on disk" -- an
+# apt run that died halfway through the tunnel leaves a group in exactly
+# half-configured, and that must read as MISSING, not present.
+dump_half="kali-tools-web half-configured"
+pkg_fully_installed "$dump_half" "kali-tools-web" \
+  && note "half-configured must not count as fully installed"
+vpn_pkg_present "$dump_half" "kali-tools-web" \
+  || note "half-configured must still count as present (vpn_pkg_present's fail-safe direction)"
+
+dump_full="kali-tools-web installed"
+pkg_fully_installed "$dump_full" "kali-tools-web" \
+  || note "a package reported installed must count as fully installed"
+vpn_pkg_present "$dump_full" "kali-tools-web" \
+  || note "a package reported installed must also count as present"
 
 if [[ "$fail" -eq 0 ]]; then
   echo "vpn-pkg-scan: OK"
