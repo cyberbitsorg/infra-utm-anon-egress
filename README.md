@@ -676,7 +676,7 @@ came within one change of doing so:
 | Change `nftables.conf.j2` or `verify.sh` and skip the negative control | A too-permissive forward rule passes every guest-side probe. This is not hypothetical: it happened, and only `tcpdump -Q out` on the WAN caught it. The recipe is in "What `make verify` proves". |
 | Unpack Mullvad's config bundle and leave it at the default mode | Hundreds of private keys world-readable. `make preflight` and the build now warn, but the warning scrolls past. Run `chmod 600 secrets/*.conf`. |
 | `apt install` a VPN client on the workstation | The check enumerates known clients plus any `network-manager-*` plugin. A client under an unfamiliar name is **not** caught. The workstation must never hold VPN credentials. |
-| Trust "the tests pass" | Tests can pass without testing anything. Ask for the mutation evidence instead: *break the guard and show me the test fails.* See `CLAUDE.md`. |
+| Trust "the tests pass" | Tests can pass without testing anything. Ask for the mutation evidence instead: *break the guard and show me the test fails.* See `docs/mutation-evidence.md`. |
 | Reuse the workstation across engagements | It is disposable by design. `make destroy && make up` gives a fresh Kali and a fresh entry/exit pair. |
 | Run the lab while a host VPN is up | The vmnet bridge can hijack a route that falls inside its subnet. `make preflight` refuses; see "Host-only subnet". |
 

@@ -1,13 +1,9 @@
 # Mutation evidence: the Kali toolset (`feature/kali-toolset`)
 
-CLAUDE.md's rule: *a guard is not tested until someone has broken it and
-watched the test die.* This file is that record, kept where it survives merge
-(`.superpowers/` and `docs/superpowers/` are both gitignored; this is not).
-Each entry names the guard, what was mutated, what ran, and which assertion
-caught it. Full transcripts for the entries carried over from the original
-six-task implementation live in
-`.superpowers/sdd/2026-07-30-kali-toolset/task-*-report.md` (gitignored, not
-part of this record, cited here for whoever wants the verbatim output).
+This repo's rule: *a guard is not tested until someone has broken it and
+watched the test die.* This file is that record, kept in a tracked file so it
+survives the merge. Each entry names the guard, what was mutated, what ran, and
+which assertion caught it.
 
 ## `parse_tool_groups` charset guard (`scripts/lib.sh`)
 
@@ -15,7 +11,7 @@ Weakened `[[ "$g" =~ ^[a-z0-9][a-z0-9-]*$ ]]` to `[[ -n "$g" ]]`. `bash
 tests/tool-groups.sh` failed on every injection/charset case (`web; rm -rf
 /`, `web&&reboot`, `$(id)`, `web/../../etc`, `Web`, `-web`, `web.passwords`,
 `web_passwords`), each through its own `should have been rejected` assertion,
-not a generic abort. Restored; suite green again. Source: task-1-report.md.
+not a generic abort. Restored; suite green again.
 
 ## `kali-*` prefix rejection (`scripts/lib.sh`)
 
@@ -23,7 +19,7 @@ Deleted the `case "$g" in kali-*) die ...` block. The suite failed on all four
 umbrella-metapackage cases (`kali-linux-large`, `kali-linux-everything`, `web
 kali-linux-headless`, `kali-tools-web`) plus the `render_tool_groups_var`
 case, each through its named `should have been rejected` assertion. Restored;
-green. Source: task-1-report.md.
+green.
 
 ## Pathname-expansion (noglob) handling (`scripts/lib.sh`)
 
@@ -34,7 +30,7 @@ directory name that happens to pass the charset regex) and only then died on
 expanded name visible in the output (`got: ansible`), proving the accept-then-
 die order rather than a clean rejection. Fixed with `set -f` / `set +f`
 around the word-splitting loop, restoring the caller's noglob state
-afterward. Source: task-1-report.md.
+afterward.
 
 ## Watch-list drift test (`tests/vpn-watch-list.sh`)
 
@@ -49,7 +45,7 @@ Two directions tested against the two copies of the VPN watch list
   (`> something-else`).
 
 Both restored, diffed byte-identical against a pre-mutation backup, suite
-green. Source: task-3-report.md.
+green.
 
 ## Tool-group existence check (`ansible/roles/workstation/tasks/tools.yaml`, "Fail on a tool group Kali does not have")
 
@@ -59,7 +55,6 @@ through the guard's own `ansible.builtin.fail`, naming `nosuchgroup`,
 "Install the selected Kali tool groups" with a raw apt error (`No package
 matching 'kali-tools-nosuchgroup' is available`) -- the failure mode the guard
 exists to replace with a clear diagnosis. Guard restored, verified green.
-Source: task-4-report.md.
 
 ## Purge-collateral guard ("Refuse a purge that would take the requested tools with it")
 
@@ -75,7 +70,7 @@ kali-tools-detect`), `changed=0` -- nothing was actually purged. This test is
 also what caught the original brief's regex bug (`^Remv ` only, never
 matching the `Purg ` lines apt actually emits for directly-named packages),
 which would have let this exact scenario purge for real. Restored; verified
-green. Source: task-4-report.md.
+green.
 
 ## `verify.sh` tool-group-installed assertion (original `vpn_pkg_present`-based version)
 
@@ -96,9 +91,8 @@ Two mutations, against a live guest:
   behavior), just a different one than predicted; recorded rather than
   glossed over. Guard restored; verified green.
 
-Source: task-5-report.md (also documents the WAN negative control run
-immediately after this change, per CLAUDE.md's rule to re-run it after any
-`verify.sh` edit).
+The WAN negative control was re-run immediately after this change, as this
+repo requires after any `verify.sh` edit.
 
 ## Finding 2: `pkg_fully_installed` (`scripts/verify.sh`, this fix wave)
 
@@ -168,7 +162,7 @@ confirmed absent via `dpkg-query`.
 
 Not itself a guard with a mutation test, since the fix is a deletion, but
 recorded because it is the critical finding of this fix wave and the original
-implementation's own evidence (task-4-report.md, "Concerns" #2) had already
+implementation's own report had already
 surfaced it live: with the pre-fix `desktop.yaml`, adding a real-dependent
 package to the watch list caused `desktop.yaml`'s unconditional,
 non-simulated purge to attempt removing it for real, before `tools.yaml`'s
