@@ -59,21 +59,10 @@
     mode: "0755"
 
 - name: Order WireGuard after nftables
-  # THE fail-closed mechanism: without After=, systemd may start wg-quick
-  # first and a boot could route before the ruleset exists.
-  #
-  # Requires=, not Wants=: Wants is advisory, so a failed nftables.service
-  # would let wg-quick bring the tunnel up with no ruleset behind it.
-  #
-  # PartOf= because Debian's nftables.service runs `nft flush ruleset` on stop,
-  # which destroys wg-quick's own packet-marking table. Without it,
-  # `systemctl stop nftables` leaves wg-quick "running" with no handshake and
-  # nothing that says why.
-  #
-  # This narrows the failure rather than eliminating it: with nftables failed
-  # there is no ruleset at all and the kernel default is accept. What prevents
-  # that is `validate:` on the template above, which stops an unparseable
-  # /etc/nftables.conf from landing in the first place.
+  # THE fail-closed mechanism. After= so a boot cannot route before the ruleset
+  # exists; Requires= not Wants= so a failed nftables cannot leave the tunnel
+  # up with nothing behind it; PartOf= because Debian's nftables.service flushes
+  # the ruleset on stop, taking wg-quick's own marking table with it.
   ansible.builtin.copy:
     dest: "/etc/systemd/system/wg-quick@{{ wg_interface }}.service.d/10-after-nftables.conf"
     owner: root

@@ -58,16 +58,11 @@ table inet filter {
     # workstation has no egress, which is the entire promise.
     iifname "{{ anon_internal_if }}" oifname "{{ wg_interface }}" accept
 
-    # Return traffic, and ONLY tunnel -> internal.
-    #
-    # This was once an unqualified `ct state established,related accept`, which
-    # was a clear-net leak: conntrack keys on the IP 5-tuple, NOT the output
-    # interface, so an entry created while the tunnel was up stays ESTABLISHED
-    # for five days after it goes away. That is reachable, not theoretical --
-    # wg-quick's del_if() removes its policy routes BEFORE the interface, so
-    # there is a window where the effective route is already the WAN. Requiring
-    # `iifname {{ wg_interface }}` closes it by construction: with the tunnel
-    # gone, no packet can carry that input interface.
+    # Return traffic, and ONLY tunnel -> internal. Unqualified, this was a
+    # clear-net leak: conntrack keys on the 5-tuple, not the output interface,
+    # so entries survive the tunnel by five days -- and wg-quick removes its
+    # policy routes before the interface, leaving a window where the effective
+    # route is already the WAN. Requiring iifname wg0 closes it by construction.
     iifname "{{ wg_interface }}" oifname "{{ anon_internal_if }}" ct state established,related accept
   }
 
@@ -87,17 +82,13 @@ table inet filter {
     # intentionally covers the whole flow.
     oifname "{{ anon_wan_if }}" ip daddr {{ mullvad_endpoint_ip }} udp dport {{ mullvad_endpoint_port }} accept
 
-    # Replies to the inbound management SSH, scoped to source port 22 so it
-    # cannot carry anything else out. Originating a new flow from sport 22 is
-    # root-only and would still need an inbound packet first.
-    #
-    # DELIBERATELY STATELESS, unlike every other accept here. conntrack only
-    # starts tracking when a ruleset referencing `ct` is first loaded -- on a
-    # cold build that moment is mid-play, while Ansible is already connected.
-    # That in-flight connection has no conntrack entry, so its replies failed
-    # `ct state established`, were dropped along with the RST, and `make up`
-    # hung forever at that exact task. Being unable to lock yourself out of the
-    # repair path is worth more than the marginal tightening.
+    # Replies to inbound management SSH, scoped to sport 22 so nothing else
+    # rides out. DELIBERATELY STATELESS, unlike every other accept here:
+    # conntrack starts tracking only when a ct-referencing ruleset first loads,
+    # which on a cold build is mid-play, so Ansible's in-flight connection has
+    # no entry and its replies (and the RST) were dropped -- `make up` hung
+    # forever at that task. Not being able to lock yourself out of the repair
+    # path beats the marginal tightening.
     oifname "{{ anon_wan_if }}" tcp sport 22 accept
 
     # The gateway must be able to ORIGINATE one thing on the internal segment:

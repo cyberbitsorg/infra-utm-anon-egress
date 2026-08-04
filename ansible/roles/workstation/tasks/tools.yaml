@@ -1,17 +1,11 @@
 ---
-# Kali function groups, selected per build in lab.conf (KALI_TOOL_GROUPS) and
-# handed here as workstation_tools_groups WITHOUT the kali-tools- prefix. This
-# file prepends it, which is what makes the kali-linux-* umbrellas unreachable:
-# all four pull openvpn and vpnc, while no kali-tools-* group pulls any VPN
-# package at all.
-#
-# Everything here needs egress, and this host reaches a mirror ONLY through the
-# gateway's tunnel -- so the tools are downloaded over the VPN, never over the
-# real IP.
+# Kali function groups from lab.conf, WITHOUT the kali-tools- prefix, which
+# this file prepends -- that is what makes the kali-linux-* umbrellas
+# unreachable, since all four pull openvpn and vpnc and no kali-tools-* does.
+# Everything downloads over the tunnel, never the real IP.
 #
 # Ordering is load-bearing: existence check, install, then a purge that is
-# simulated before it runs. Reversing the last two would let a purge take the
-# tools out with the client.
+# simulated first, or the purge takes the requested tools with it.
 
 - name: Fail clearly if tool groups are selected without egress
   ansible.builtin.fail:
@@ -141,16 +135,12 @@
     - (anon_vpn_present | difference(anon_would_remove)) | length > 0
 
 - name: Refuse a purge that would take the requested tools with it
-  # The rule: what the purge removes must be a SUBSET of the watch list. Any
-  # collateral means a tool group pulled a VPN client in as a hard dependency,
-  # so purging it would remove the tools that were asked for. Neither outcome
-  # is acceptable without a decision. Reached only once the task above has
-  # confirmed the simulation was parsed, so "no collateral" here can never mean
-  # "the parse found nothing at all".
+  # What the purge removes must be a SUBSET of the watch list: collateral means
+  # a tool group pulled a VPN client in as a hard dependency, so purging takes
+  # the requested tools with it. Neither outcome is acceptable unasked.
   #
-  # Mutation: watch-list a library with dependents (libosip2-15t64, pulled in
-  # by kali-tools-detect) and the play stops here naming the collateral,
-  # changed=0, nothing purged.
+  # Mutation: watch-list a library with dependents (libosip2-15t64, via
+  # kali-tools-detect) and the play stops here naming it, nothing purged.
   vars:
     collateral: "{{ anon_would_remove | difference(workstation_vpn_watch_list) }}"
   ansible.builtin.fail:

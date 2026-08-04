@@ -5,11 +5,6 @@
 # SSH is key-only regardless.
 gateway_console_password: ""
 
-# Path on the CONTROL NODE to the operator's original WireGuard config. No task
-# reads it directly; it only keeps the vars-file key defined. The role consumes
-# the sanitised copy below.
-mullvad_wg_config: ""
-
 # Path on the CONTROL NODE to the sanitised WireGuard config (DNS line and IPv6
 # stripped), injected by scripts/up.sh. Empty means "no tunnel": every Phase 2
 # task is skipped and the workstation keeps zero egress -- a safe state.

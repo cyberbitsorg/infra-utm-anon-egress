@@ -51,8 +51,7 @@
 
 # Everything below needs a tunnel. With no sanitised config the gateway stays
 # as Phase 1 left it and the workstation keeps zero egress -- a safe state.
-# Gated on mullvad_wg_sanitized (the file the role reads), not on
-# mullvad_wg_config (the operator's path, which no task here touches).
+# Gated on mullvad_wg_sanitized, the sanitised copy scripts/up.sh stages.
 - name: Configure the anonymity layer
   ansible.builtin.include_tasks: wireguard.yaml
   when: mullvad_wg_sanitized | default('') | length > 0

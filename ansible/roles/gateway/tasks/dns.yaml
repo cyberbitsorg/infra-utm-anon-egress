@@ -18,19 +18,10 @@
   register: anon_unbound_conf
 
 - name: Bridge DNS through the tunnel until unbound exists
-  # FIRST RUN ONLY. The ruleset has just cut off SLIRP's 10.0.2.3 and the next
-  # task must resolve a mirror to install unbound. Mullvad's resolver is
-  # reachable inside the tunnel, so this bridges the gap without leaking a
-  # query. Guarded on our unbound fragment existing: without the guard this and
-  # the last task in this file overwrite each other every run and the role
-  # never converges.
-  #
-  # `follow: false` (the module default, stated because it is load-bearing)
-  # REPLACES the image's symlink to systemd-resolved's runtime file with a real
-  # file; writing through the symlink would be discarded on reboot.
-  #
-  # With the tunnel down this leaves the gateway with no DNS at all: the
-  # fail-closed promise applied consistently, not a defect.
+  # FIRST RUN ONLY: the ruleset just cut off SLIRP's resolver and the next task
+  # must resolve a mirror. Guarded on our fragment existing, or this and the
+  # last task overwrite each other every run. `follow: false` replaces the
+  # image's systemd-resolved symlink with a real file that survives a reboot.
   ansible.builtin.copy:
     dest: /etc/resolv.conf
     owner: root
