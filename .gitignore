@@ -6,19 +6,16 @@ images/*
 generated/
 *.seed.iso
 cloud-init/*.rendered.yaml
-
-# Ansible inventory generated from running VMs
 ansible/inventory/hosts.generated.yaml
 
-# ansible-lint's project-local runtime home (`make lint` recreates it). It holds
-# only empty collections/modules/roles directories today, which git cannot track
-# anyway, but it is the directory ansible-lint installs collections into when it
-# needs them: one `git add -A` away from vendoring a few thousand files.
+# ansible-lint's project-local runtime home, recreated by `make lint`. Empty
+# today, but it is where collections get installed: one `git add -A` away from
+# vendoring a few thousand files.
 .ansible/
 
 # Secrets and local config. The .example files ARE tracked; the real ones never
-# are. Belt and braces on .env: ignore every .env* variant, then re-include the
-# example, so a .env.local or .env.bak cannot be committed by accident either.
+# are. Belt and braces on both .env and secrets/, because the near-miss is a
+# sibling copy (.env.bak, secrets_bu/) that the plain rule does not cover.
 lab.conf
 .env*
 !.env.example
@@ -28,13 +25,9 @@ id_ed25519.pub
 .vault_pass
 secrets/*
 !secrets/.gitkeep
-# Same belt-and-braces as .env above. `secrets/*` does NOT cover a sibling copy,
-# and a directory of WireGuard configs is exactly the thing an operator makes a
-# quick backup of before regenerating keys. secrets_bu/ was found untracked and
-# committable during the multihop work; any secrets* variant is now ignored.
 secrets*/
 !secrets/
-*.conf.singlehop.bak
+*.bak
 
 # Logs
 *.log
