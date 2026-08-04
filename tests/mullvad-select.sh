@@ -81,7 +81,11 @@ mullvad_spec_matches nl bg-sof-wg-001 && note "'nl' must not match another count
 for h in bg-sof-wg-001 bg-sof-wg-002 bg-sofia-wg-001 se-got-wg-001 se-sto-wg-001 se2-sto-wg-001 nl-ams-wg-001; do
   for spec in "" se bg bg-sof nl zz; do
     if mullvad_spec_matches "$spec" "$h"; then want=1; else want=0; fi
-    if mullvad_relay_match "$J" "$spec" | grep -qxF "$h"; then got=1; else got=0; fi
+    # Captured and searched, never `| grep -q`: that exits at the first match
+    # and SIGPIPEs the producer, which pipefail reports as "no match". This
+    # test hit exactly that, intermittently.
+    matches="$(mullvad_relay_match "$J" "$spec")"
+    if _mullvad_list_has "$matches" "$h"; then got=1; else got=0; fi
     [[ "$want" == "$got" ]] \
       || note "mullvad_relay_match and mullvad_spec_matches disagree on spec '${spec}' vs ${h} (match=${got}, predicate=${want})"
   done
