@@ -179,13 +179,16 @@ cidr_contains() {
 parse_tool_groups() {
   local raw="${1-${KALI_TOOL_GROUPS:-}}" g seen=" " noglob_was_on
   # Unquoted expansion is the word splitting that reads the list; noglob keeps
-  # * ? [ ] from expanding to filenames before the charset guard sees them, and
-  # a local default IFS keeps a caller's exotic IFS from breaking the split.
-  local IFS=$' \t\n'
+  # * ? [ ] from expanding to filenames before the charset guard sees them.
+  # Commas separate too, because that is how the docs print the group list and
+  # a comma can never be part of a valid name -- accepting it guesses nothing.
+  local IFS=$' \t\n,'
   noglob_was_on=$(set -o | grep -c "^noglob.*on" || true)
   set -f
   # shellcheck disable=SC2086
   for g in $raw; do
+    # Two adjacent commas yield an empty field; that is sloppy, not wrong.
+    [[ -n "$g" ]] || continue
     [[ "$g" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
       || die "KALI_TOOL_GROUPS contains an invalid group name: '${g}'. Use lowercase Kali group names, digits and dashes only."
     case "$g" in
