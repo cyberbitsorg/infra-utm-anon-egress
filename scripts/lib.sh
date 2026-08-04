@@ -70,7 +70,7 @@ load_env() {
 # OMITTED so the tracked group_vars defaults decide what "unset" means.
 render_secret_vars() {
   local name val esc
-  for name in GATEWAY_CONSOLE_PASSWORD WORKSTATION_CONSOLE_PASSWORD MULLVAD_WG_CONFIG; do
+  for name in GATEWAY_CONSOLE_PASSWORD WORKSTATION_CONSOLE_PASSWORD; do
     eval "val=\${${name}:-}"
     [[ -n "$val" ]] || continue
     # UNQUOTED on purpose: quoting this assignment emits backslash-escaped

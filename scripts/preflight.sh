@@ -77,12 +77,6 @@ fi
 # seconds, found after the ruleset is installed it costs a debugging session.
 load_env
 
-# Exactly one of the two mechanisms; a precedence rule would hide which exit
-# you are actually on.
-if [[ -n "${MULLVAD_WG_CONFIG:-}" && -n "${MULLVAD_EXIT:-}" ]]; then
-  die "Both MULLVAD_WG_CONFIG and MULLVAD_EXIT are set in .env. They are mutually exclusive: clear one. MULLVAD_EXIT assembles a multihop config for you; MULLVAD_WG_CONFIG uses a file you assembled yourself."
-fi
-
 if [[ -n "${MULLVAD_EXIT:-}" ]]; then
   mullvad_load_relays "$MULLVAD_RELAY_CACHE" "$MULLVAD_CACHE_MAX_AGE_DAYS"
   log "Resolving exit '${MULLVAD_EXIT}'${MULLVAD_ENTRY:+ via entry '${MULLVAD_ENTRY}'}"
@@ -100,24 +94,8 @@ if [[ -n "${MULLVAD_EXIT:-}" ]]; then
   validate_wg_config "$wg_derived" \
     || die "The assembled config is not usable (reason above)."
   ok "Exit ${exit_host} ($(mullvad_relay_field "$MULLVAD_RELAY_CACHE" "$exit_host" country_code)) via entry ${entry_host} ($(mullvad_relay_field "$MULLVAD_RELAY_CACHE" "$entry_host" country_code)), endpoint $(wg_endpoint_ip "$wg_derived"):$(wg_endpoint_port "$wg_derived")"
-elif [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
-  wg_cfg="${MULLVAD_WG_CONFIG}"
-  [[ "$wg_cfg" = /* ]] || wg_cfg="${REPO_ROOT}/${wg_cfg}"
-  log "Checking WireGuard config: ${wg_cfg}"
-  if validate_wg_config "$wg_cfg"; then
-    ok "WireGuard config is usable (endpoint $(wg_endpoint_ip "$wg_cfg"):$(wg_endpoint_port "$wg_cfg"))"
-    [[ "$(wg_endpoint_port "$wg_cfg")" != "$MULLVAD_SINGLEHOP_PORT" ]] \
-      || warn "${wg_cfg} uses port ${MULLVAD_SINGLEHOP_PORT}: this is a SINGLE-hop config. Use MULLVAD_EXIT to get multihop assembled for you."
-    cfg_perms="$(stat -f '%Lp' "$wg_cfg" 2>/dev/null || echo '')"
-    case "$cfg_perms" in
-      600|400) ;;
-      *) warn "${wg_cfg} is mode ${cfg_perms}; it holds a private key. Fix with: chmod 600 ${wg_cfg}" ;;
-    esac
-  else
-    die "The WireGuard config is not usable (reason above). Fix it before 'make up'."
-  fi
 else
-  warn "Neither MULLVAD_EXIT nor MULLVAD_WG_CONFIG is set in .env: the gateway will have no tunnel and the workstation no egress."
+  warn "MULLVAD_EXIT is not set in .env: the gateway will have no tunnel and the workstation no egress."
 fi
 
 log "Checking Kali tool groups"

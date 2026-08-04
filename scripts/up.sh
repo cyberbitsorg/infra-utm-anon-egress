@@ -41,13 +41,9 @@ run_ansible() {
 
   # The config is sanitised HERE, in bash, where the transformation is unit
   # tested (tests/wg-config.sh). The sanitised copy is staged under its own key
-  # (mullvad_wg_sanitized); the role never reads the operator's original path.
-  # The both-set guard is repeated from preflight because `make configure`
-  # never runs preflight.
+  # (mullvad_wg_sanitized). Resolved here as well as in preflight, because
+  # `make configure` never runs preflight.
   local wg_src wg_tmp="" wg_built="" pair entry_host exit_host
-  if [[ -n "${MULLVAD_WG_CONFIG:-}" && -n "${MULLVAD_EXIT:-}" ]]; then
-    die "Both MULLVAD_WG_CONFIG and MULLVAD_EXIT are set in .env; they are mutually exclusive."
-  fi
   if [[ -n "${MULLVAD_EXIT:-}" ]]; then
     mullvad_load_relays "$MULLVAD_RELAY_CACHE" "$MULLVAD_CACHE_MAX_AGE_DAYS"
     pair="$(mullvad_resolve_pair "$MULLVAD_RELAY_CACHE" "${REPO_ROOT}/secrets" \
@@ -64,9 +60,6 @@ run_ansible() {
       || die "Could not assemble the multihop config (reason above)."
     wg_src="$wg_built"
     log "Multihop: exit ${exit_host} via entry ${entry_host}"
-  elif [[ -n "${MULLVAD_WG_CONFIG:-}" ]]; then
-    wg_src="${MULLVAD_WG_CONFIG}"
-    [[ "$wg_src" = /* ]] || wg_src="${REPO_ROOT}/${wg_src}"
   fi
   if [[ -n "${wg_src:-}" ]]; then
     validate_wg_config "$wg_src" || die "The WireGuard config is not usable (reason above)."
