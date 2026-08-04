@@ -10,7 +10,13 @@ source scripts/wg-lib.sh
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 fail=0
-note() { echo "  FAIL $1"; fail=1; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
+note() { _hdr; echo "  FAIL $1"; fail=1; }
 
 # A realistic Mullvad multihop config: endpoint is <ENTRY-IP>:<EXIT-MULTIHOP-PORT>,
 # the PublicKey is the exit server's, and Mullvad ships both v4 and v6 addresses.
@@ -157,11 +163,11 @@ AllowedIPs = 0.0.0.0/0
 Endpoint = 193.138.218.220:3004
 EOF
 
-echo "wg_endpoint_ip / wg_endpoint_port:"
+section "wg_endpoint_ip / wg_endpoint_port:"
 [[ "$(wg_endpoint_ip "${tmp}/good.conf")" == "193.138.218.220" ]] || note "endpoint IP not parsed"
 [[ "$(wg_endpoint_port "${tmp}/good.conf")" == "3004" ]] || note "endpoint port not parsed"
 
-echo "validate_wg_config:"
+section "validate_wg_config:"
 validate_wg_config "${tmp}/good.conf" 2>/dev/null || note "a valid multihop config was rejected"
 # A hostname endpoint must be refused: resolving it would need clear-net DNS
 # before the tunnel exists, which is a leak by construction (design §2).
@@ -192,13 +198,13 @@ if validate_wg_config "${tmp}/v6only-allowedips.conf" 2>/dev/null; then
   note "an IPv6-only AllowedIPs must be refused (no IPv4 route would remain)"
 fi
 
-echo "Endpoint with a trailing comment:"
+section "Endpoint with a trailing comment:"
 [[ "$(wg_endpoint_port "${tmp}/comment-endpoint.conf")" == "3004" ]] \
   || note "a trailing comment on Endpoint corrupts the parsed port"
 validate_wg_config "${tmp}/comment-endpoint.conf" 2>/dev/null \
   || note "a valid config with a trailing Endpoint comment must still be accepted"
 
-echo "sanitize_wg_config:"
+section "sanitize_wg_config:"
 san="$(sanitize_wg_config "${tmp}/good.conf")"
 grep -q 'DNS' <<<"$san"        && note "the DNS line must be removed (unbound owns DNS)"
 grep -q 'fc00:' <<<"$san"      && note "IPv6 must be stripped from Address"
@@ -211,7 +217,7 @@ grep -q 'PrivateKey' <<<"$san" || note "the private key must survive"
 grep -q '^\[Interface\]' <<<"$san" || note "[Interface] section lost"
 grep -q '^\[Peer\]' <<<"$san"      || note "[Peer] section lost"
 
-echo "sanitize_wg_config (IPv6 in any position):"
+section "sanitize_wg_config (IPv6 in any position):"
 san_first="$(sanitize_wg_config "${tmp}/v6first.conf")"
 grep -q 'fc00:' <<<"$san_first" && note "a leading IPv6 Address entry must be stripped"
 grep -q '::/0'  <<<"$san_first" && note "a leading IPv6 AllowedIPs entry must be stripped"
@@ -225,12 +231,12 @@ grep -qE '^AllowedIPs = 0\.0\.0\.0/0$' <<<"$san_first" \
   || note "AllowedIPs not cleanly rejoined after stripping a leading IPv6 entry"
 grep -qE ',,|= ,|,$' <<<"$san_first" && note "stray comma left in sanitized output"
 
-echo "sanitize_wg_config (operator MTU):"
+section "sanitize_wg_config (operator MTU):"
 san_mtu="$(sanitize_wg_config "${tmp}/mtu.conf")"
 grep -qE '^MTU[[:space:]]*=' <<<"$san_mtu" \
   && note "an operator-supplied MTU line must be stripped (the gateway role's wg_mtu must be the only source)"
 
-echo "sanitize_wg_config (Post/Pre hooks):"
+section "sanitize_wg_config (Post/Pre hooks):"
 san_hooks="$(sanitize_wg_config "${tmp}/hooks.conf")"
 grep -qE '^(PostUp|PostDown|PreUp|PreDown)' <<<"$san_hooks" \
   && note "PostUp/PostDown/PreUp/PreDown must be stripped (wg-quick must not manage firewalling)"

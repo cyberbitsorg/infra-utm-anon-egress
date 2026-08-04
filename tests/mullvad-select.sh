@@ -9,18 +9,18 @@ source scripts/mullvad-lib.sh
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 fail=0
-note() { echo "  FAIL $1"; fail=1; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
 
-# A fixture relay table. Deliberately contains the traps that matter:
-#   se2-... exists so a "se" prefix must not match it
-#   bg-sofia-... exists so a "bg-sof" prefix must not match it
-#   nl-ams-wg-002 is INACTIVE and must never be selected
-#   se-got-wg-001 has multihop_port 51820, the single-hop port, to drive Task 2
-#   bg-sof-wg-003 has NO multihop_port key at all, and bg-sof-wg-004 has one
-#   that is JSON null -- both are realistic shapes of "this relay has no
-#   usable multihop endpoint" and both must drive the same rejection in
-#   mullvad_assert_multihop. Marked INACTIVE so the empty-spec "7 active
-#   relays" count below does not have to change to accommodate them.
+note() { _hdr; echo "  FAIL $1"; fail=1; }
+
+# A fixture relay table carrying the traps that matter: se2-/bg-sofia- so a
+# prefix must not over-match, an INACTIVE relay that must never be selected,
+# the single-hop port 51820, and two relays with a missing and a null
+# multihop_port. The last three are INACTIVE so the "7 active" count holds.
 cat > "${tmp}/relays.json" <<'EOF'
 [
  {"hostname":"bg-sof-wg-001","active":true,"ipv4_addr_in":"146.70.188.130","multihop_port":3225,"country_code":"bg","city_code":"sof"},
@@ -37,7 +37,7 @@ cat > "${tmp}/relays.json" <<'EOF'
 EOF
 J="${tmp}/relays.json"
 
-echo "mullvad_relay_match:"
+section "mullvad_relay_match:"
 got="$(mullvad_relay_match "$J" se | tr '\n' ' ')"
 [[ "$got" == "se-got-wg-001 se-sto-wg-001 " ]] \
   || note "'se' must match only se-* and never se2-* (got '${got}')"
@@ -63,7 +63,7 @@ got="$(mullvad_relay_match "$J" "" | grep -c . || true)"
 [[ "$got" == "7" ]] \
   || note "an empty spec must match every active relay, not none (got '${got}')"
 
-echo "mullvad_spec_matches:"
+section "mullvad_spec_matches:"
 # The rule itself, as a predicate. verify.sh checks the pinned exit against
 # MULLVAD_EXIT with this same function, so the cases below are the ones that
 # decide both which country gets selected and which country counts as verified.
@@ -91,7 +91,7 @@ for h in bg-sof-wg-001 bg-sof-wg-002 bg-sofia-wg-001 se-got-wg-001 se-sto-wg-001
   done
 done
 
-echo "mullvad_relay_field:"
+section "mullvad_relay_field:"
 [[ "$(mullvad_relay_field "$J" bg-sof-wg-001 multihop_port)" == "3225" ]] \
   || note "multihop_port lookup"
 [[ "$(mullvad_relay_field "$J" se-got-wg-001 ipv4_addr_in)" == "185.213.154.66" ]] \
@@ -101,7 +101,7 @@ echo "mullvad_relay_field:"
 [[ -z "$(mullvad_relay_field "$J" does-not-exist country_code)" ]] \
   || note "an unknown hostname must yield nothing"
 
-echo "relay table cache:"
+section "relay table cache:"
 # mullvad_relay_match / mullvad_relay_field answer from a table derived from the
 # JSON once, instead of parsing it per call. A cache that can answer for a file
 # it was not built from is worse than the 26 s it saves: mullvad_load_relays
@@ -138,17 +138,12 @@ got="$(mullvad_relay_field "${tmp}/dupe.json" bg-sof-wg-001 multihop_port)"
 [[ "$got" == "3225" ]] \
   || note "every field of a duplicated hostname must come from that same first record (got '${got}')"
 
-echo "the derived table's format version:"
-# A table written by an OLDER build of mullvad-lib.sh must be discarded, not
-# read. The size/mtime half of the stamp cannot do that on its own: it only
-# notices a changed relay list, so a table built before (say) the separator
-# filter below existed keeps answering from forged records for as long as the
-# JSON beneath it is untouched -- up to the full 7-day cache life.
-#
-# So the fixture below is a hostile table carrying the CORRECT size/mtime stamp
-# and the wrong format version. That is the only shape that tells the version
-# apart from the rest of the stamp: give it a wrong mtime too and the test passes
-# whether the version exists or not.
+section "the derived table's format version:"
+# A table from an OLDER build must be discarded: size/mtime alone only notices
+# a changed relay list, so a table predating the separator filter keeps serving
+# forged records for the full 7-day cache life. The fixture therefore carries a
+# CORRECT stamp and a wrong format version -- the only shape that isolates the
+# version; a wrong mtime too and the test passes either way.
 VJ="${tmp}/version.json"
 cp "$J" "$VJ"
 mullvad_relay_field "$VJ" bg-sof-wg-001 country_code >/dev/null
@@ -160,24 +155,17 @@ got="$(mullvad_relay_match "$VJ" bg-sof | tr '\n' ' ')"
 [[ "$got" == "bg-sof-wg-001 bg-sof-wg-002 " ]] \
   || note "...and the rebuild must produce the real table (got '${got}')"
 
-echo "the derived table's separators:"
-# The table is line- and tab-separated, so anything that can carry either
-# separator must be dropped before it is written -- otherwise a relay list can
-# forge records this repo has no way to tell from real ones. Both hostnames
-# below were verified to do exactly that before the hostname filter existed:
-# "inj\nH\tza-jnb-wg-999" put za-jnb-wg-999 into the hostname stream as a
-# selectable candidate that is in no relay list, and "vic\tcountry_code" made
-# `mullvad_relay_field <json> vic country_code` answer
-# "hostname<TAB>vic<TAB>country_code". The per-relay scan this table replaced
-# answered nothing for either, and "nothing" is what every caller already
-# treats as fatal.
+section "the derived table's separators:"
+# The table is line- and tab-separated, so anything carrying a separator must
+# be dropped before it is written. Both hostnames below were verified to forge
+# records before the filter existed: "inj\nH\tza-jnb-wg-999" injected a
+# selectable relay that is in no list, and "vic\tcountry_code" made a field
+# lookup answer with a fabricated row. ok-bbb-wg-001 carries the same attack in
+# a VALUE, so one fixture pins both filters.
 #
-# Not a privilege boundary -- whoever can hand this repo a relay list can choose
-# the exit country with ordinary-looking JSON -- but an answer about a server
-# that does not exist is a different class of wrong from a refusal to answer.
-# ok-bbb-wg-001 carries the same attack in a VALUE instead of a hostname, which
-# is the case the writer already filtered; it is here so both filters are pinned
-# by the same fixture.
+# Not a privilege boundary -- whoever supplies the list can pick the exit with
+# ordinary JSON -- but answering about a server that does not exist is worse
+# than refusing to answer.
 python3 - "${tmp}/hostile.json" <<'PY'
 import json, sys
 json.dump([
@@ -211,7 +199,7 @@ got="$(mullvad_relay_field "$HJ" 'vic' country_code)"
 mullvad_assert_multihop "$HJ" ok-aaa-wg-001 za-jnb-wg-999 2>/dev/null \
   && note "a forged exit hostname must be rejected as not in the relay list"
 
-echo "the derived table's mode:"
+section "the derived table's mode:"
 # 0600 for consistency with the pin, not for secrecy: the table holds only the
 # public Mullvad relay list, no secret and no record of the operator's choice.
 # The pin is 0600 on the reasoning that a file created at the ambient umask is
@@ -226,7 +214,7 @@ rm -f "${TBLJ}.tbl"
 [[ "$(stat -f '%Lp' "${TBLJ}.tbl")" == "600" ]] \
   || note "the derived table must be mode 600 regardless of umask (got '$(stat -f '%Lp' "${TBLJ}.tbl")')"
 
-echo "_mullvad_list_has:"
+section "_mullvad_list_has:"
 # The candidate list is matched as literal strings. A corrupted pin read as a
 # basic regular expression could otherwise claim to be a candidate it does not
 # name.
@@ -240,7 +228,7 @@ _mullvad_list_has "$(printf 'bg-sof-wg-001\nbg-sof-wg-002\n')" bg-sof-wg-001 \
   || note "the FIRST line must be found too"
 _mullvad_list_has "" bg-sof-wg-001 && note "an empty list contains nothing"
 
-echo "mullvad_pick_random:"
+section "mullvad_pick_random:"
 got="$(printf 'a\nb\nc\n' | mullvad_pick_random)"
 case "$got" in a|b|c) ;; *) note "must pick one of the input lines (got '${got}')" ;; esac
 printf '' | mullvad_pick_random >/dev/null 2>&1 \
@@ -259,7 +247,7 @@ AllowedIPs = 0.0.0.0/0,::/0
 Endpoint = 146.70.188.130:51820
 EOF
 
-echo "mullvad_rewrite_endpoint:"
+section "mullvad_rewrite_endpoint:"
 out="$(mullvad_rewrite_endpoint "${tmp}/exit.conf" 185.213.154.66 3225)"
 [[ "$(grep -c '^Endpoint = 185.213.154.66:3225$' <<<"$out")" -eq 1 ]] \
   || note "the endpoint must be rewritten to entry-ip:exit-port"
@@ -281,7 +269,7 @@ out2="$(mullvad_rewrite_endpoint "${tmp}/two.conf" 1.1.1.1 3225 2>/dev/null)" \
 [[ -z "$out2" ]] \
   || note "rejection must print nothing on stdout, not a partial config (got '${out2}')"
 
-echo "mullvad_assert_multihop:"
+section "mullvad_assert_multihop:"
 mullvad_assert_multihop "$J" se-sto-wg-001 bg-sof-wg-001 2>/dev/null \
   || note "a different-country pair with a real multihop port must pass"
 mullvad_assert_multihop "$J" bg-sof-wg-001 bg-sof-wg-001 2>/dev/null \
@@ -299,48 +287,35 @@ mullvad_assert_multihop "$J" se-sto-wg-001 bg-sof-wg-003 2>/dev/null \
 mullvad_assert_multihop "$J" se-sto-wg-001 bg-sof-wg-004 2>/dev/null \
   && note "an exit whose multihop_port is null must be rejected"
 
-echo "mullvad_endpoint_port_for:"
+section "mullvad_endpoint_port_for:"
 [[ "$(mullvad_endpoint_port_for "$J" bg-sof-wg-001)" == "3225" ]] \
   || note "the exit's multihop_port is the endpoint port"
 
 # A fake secrets dir: only some relays have a config on disk, which is the real
 # world (the operator downloads a subset).
-mkdir -p "${tmp}/secrets"
+mkdir -p "${tmp}/secrets"; umask 077
 for h in bg-sof-wg-001 bg-sof-wg-002 nl-ams-wg-001; do
   cp "${tmp}/exit.conf" "${tmp}/secrets/${h}.conf"
 done
 S="${tmp}/secrets"
 PIN="${tmp}/chosen"
 
-echo "mullvad_exit_candidates:"
+section "mullvad_exit_candidates:"
 got="$(mullvad_exit_candidates "$J" "$S" bg | tr '\n' ' ')"
 [[ "$got" == "bg-sof-wg-001 bg-sof-wg-002 " ]] \
   || note "only relays with a config on disk are exit candidates (got '${got}')"
 got="$(mullvad_exit_candidates "$J" "$S" se | tr '\n' ' ')"
 [[ -z "$got" ]] || note "se has no config on disk, so no candidates (got '${got}')"
 
-echo "mullvad_resolve_pair (entry-country pre-filter, repeated):"
-# A single resolve below only proves the filter fired ONCE, and that is nearly
-# no evidence: with entry_spec "" the default-spec pool is the 7 active
-# relays, 3 of which are bg (the exit's country here). Delete the pre-filter
-# and the loop still lands outside bg by pure luck on 4-of-7 draws -- a coin
-# flip that a mutation-tester found catches its own removal only ~half the
-# time. Resolve fresh 25 times, each with its OWN pin (a reused pin would
-# just replay one draw, defeating the whole point). Each iteration's failure
-# goes through `|| note` rather than `set -e`, so a mutated run reports every
-# draw and names the pre-filter instead of aborting the suite at the backstop.
-# This runs BEFORE the single-shot checks below for the same reason: those
-# are unguarded, and if a mutation makes one of them fail, `set -e` would kill
-# the script before ever reaching this block.
+section "mullvad_resolve_pair (entry-country pre-filter, repeated):"
+# 25 fresh resolves, each with its OWN pin. One would prove almost nothing:
+# 4 of the 7 candidates are legal, so deleting the pre-filter still passes on
+# a coin flip. At 25 draws that becomes (4/7)^25, about 1 in a million.
 #
-# WHAT A MISSING FILTER LOOKS LIKE FROM HERE: a FAILED resolve, never a returned
-# same-country pair. mullvad_assert_multihop rejects such a pair before
-# mullvad_resolve_pair can return it, so there is nothing to inspect in the
-# success case and this loop no longer pretends to -- an earlier version compared
-# the returned pair's two country codes, which was unreachable code reading as
-# coverage. With 4 of 7 candidates legal, the chance all 25 iterations luck into
-# a legal draw despite a missing filter is (4/7)^25, on the order of 1 in a
-# million -- decisive rather than a coin flip.
+# A missing filter shows up as a FAILED resolve, never a same-country pair --
+# mullvad_assert_multihop rejects those before they can be returned, so there
+# is nothing to inspect on success. Failures go through `|| note`, not `set -e`,
+# so a mutated run names the pre-filter instead of aborting at the backstop.
 for i in $(seq 1 25); do
   mpin="${tmp}/chosen_mut_${i}"
   rm -f "$mpin"
@@ -348,19 +323,14 @@ for i in $(seq 1 25); do
     || note "iteration ${i}: mullvad_resolve_pair failed to find a legal entry, though 4 of 7 default candidates are outside bg -- the entry-country pre-filter regressed and mullvad_assert_multihop caught the same-country draw instead"
 done
 
-echo "mullvad_resolve_pair (an entry whose country_code cannot be read):"
-# mullvad_relay_field prints nothing for an absent field, and "" is not a
-# country -- it is the absence of one. A candidate like that must be INELIGIBLE
-# rather than merely "different from the exit's country": let it through the
-# pre-filter and it can win the draw and then abort the entire build in
-# mullvad_assert_multihop with "entry ... is not in the relay list", which is
-# neither true nor actionable, while several hundred usable candidates sat in the
-# pool. Theoretical against today's list (all 539 live relays carry every field)
-# and cheap to keep true.
+section "mullvad_resolve_pair (an entry whose country_code cannot be read):"
+# "" is not a country, it is the absence of one, so a candidate whose
+# country_code cannot be read must be INELIGIBLE rather than merely "different":
+# let it win the draw and the build aborts blaming the operator while hundreds
+# of usable candidates sat in the pool.
 #
-# Two deterministic fixtures rather than one large pool, because a random draw
-# would only expose this some of the time. aa-xxx-wg-001 sorts FIRST, so if it is
-# still eligible it wins roughly half of the draws below.
+# Two deterministic fixtures, not one pool: a random draw would expose this only
+# sometimes. aa-xxx-wg-001 sorts FIRST, so if still eligible it wins often.
 cat > "${tmp}/nocc.json" <<'EOF'
 [
  {"hostname":"aa-xxx-wg-001","active":true,"ipv4_addr_in":"10.9.0.1","multihop_port":3001},
@@ -399,19 +369,12 @@ else
     || note "the failure must be the entry-pool message, not a relay-list complaint from mullvad_assert_multihop (got '${out}')"
 fi
 
-echo "mullvad_resolve_pair (the exit's country sorts LAST):"
-# A second fixture, and the reason for it is one line of arithmetic: a `while`
-# loop reports the status of its LAST iteration. The entry pre-filter walks the
-# candidate list in sorted order, so when the alphabetically last active relay
-# happens to be in the exit's own country, the loop's final `[[ ... ]] && printf`
-# is false, the loop returns 1, and under `set -o pipefail` the whole command
-# substitution fails -- even though a legal entry was already chosen and
-# printed. The operator is then told no entry exists, which is the opposite of
-# true, and which relay sorts last is pure alphabetical luck: against the live
-# relay list this made every South African exit unbuildable while 537 legal
-# entries sat in the list.
-#
-# So: exactly two relays, the exit's own country last, one legal entry.
+section "mullvad_resolve_pair (the exit's country sorts LAST):"
+# A `while` loop reports its LAST iteration's status, so when the
+# alphabetically last relay is in the exit's own country the filter returns 1
+# and pipefail fails the whole substitution -- telling the operator no entry
+# exists when one was already chosen. Against the live list this made every
+# South African exit unbuildable. Two relays, exit's country last, one legal.
 cat > "${tmp}/tail.json" <<'EOF'
 [
  {"hostname":"aa-xxx-wg-001","active":true,"ipv4_addr_in":"10.9.0.1","multihop_port":3001,"country_code":"aa","city_code":"xxx"},
@@ -428,7 +391,7 @@ else
   note "an exit whose country sorts last must still resolve: aa-xxx-wg-001 is a legal entry, but the pre-filter loop returned the status of its last iteration (zz-yyy-wg-001, the exit's own country) and pipefail turned that into 'no entry matches'"
 fi
 
-echo "mullvad_resolve_pair:"
+section "mullvad_resolve_pair:"
 rm -f "$PIN"
 got="$(mullvad_resolve_pair "$J" "$S" bg "" "$PIN")"
 entry="${got%% *}"; exit_h="${got##* }"
@@ -458,18 +421,11 @@ mullvad_resolve_pair "$J" "$S" zz "" "$PIN" >/dev/null 2>&1 \
 mullvad_resolve_pair "$J" "$S" bg bg "$PIN" >/dev/null 2>&1 \
   && note "an entry spec confined to the exit's own country must fail"
 
-echo "mullvad_resolve_pair (a pin that was legal and no longer is):"
-# Both pins below survive BOTH of mullvad_pair_ok's candidate checks -- the
-# pinned exit still matches MULLVAD_EXIT and still has a config on disk, the
-# pinned entry still matches MULLVAD_ENTRY -- so the only thing that can reject
-# them is the mullvad_assert_multihop call on the reuse path.
-#
-# That call is load-bearing beyond this function: preflight.sh deliberately does
-# NOT re-assert multihop, on the stated grounds that every return path out of
-# mullvad_resolve_pair already has. Drop it and an illegal pin passes preflight
-# and is caught only by up.sh's backstop -- i.e. after the VMs exist, which is
-# precisely what "single-hop must fail before any VM is created" forbids. These
-# two cases are what keeps that comment true.
+section "mullvad_resolve_pair (a pin that was legal and no longer is):"
+# Both pins survive both candidate checks, so only the mullvad_assert_multihop
+# call on the reuse path can reject them. preflight.sh deliberately does not
+# re-assert multihop, trusting that path -- drop it and an illegal pin is caught
+# only after the VMs exist, which is what these two cases prevent.
 PIN_SAME="${tmp}/chosen-same-country"
 printf 'bg-sof-wg-002 bg-sof-wg-001\n' > "$PIN_SAME"
 mullvad_resolve_pair "$J" "$S" bg bg "$PIN_SAME" >/dev/null 2>&1 \
@@ -486,27 +442,17 @@ printf 'nl-ams-wg-001 se-got-wg-001\n' > "$PIN_SINGLE"
 mullvad_resolve_pair "$J" "$S_SINGLE" se-got "" "$PIN_SINGLE" >/dev/null 2>&1 \
   && note "a pinned exit that now resolves to port ${MULLVAD_SINGLEHOP_PORT} must be discarded on reuse, not kept because the hostnames still match"
 
-echo "mullvad_pair_ok (where the pin sits in the list must not matter):"
-# mullvad_pair_ok captures each candidate list and searches the string. The
-# obvious spelling -- `mullvad_entry_candidates ... | grep -qxF "$entry"` -- is
-# wrong, and this is where that costs the operator something: grep exits at the
-# first match, mullvad_relay_match's printf takes SIGPIPE on its next stdio
-# flush, pipefail turns that into "this pin is no longer legal", and the tunnel
-# moves to another country on a run where nothing changed. That is the bug commit
-# c2e4520 fixed.
+section "mullvad_pair_ok (where the pin sits in the list must not matter):"
+# mullvad_pair_ok captures each list and searches the string. The obvious
+# `... | grep -qxF "$entry"` is wrong: grep exits at the first match, the
+# producer takes SIGPIPE on its next stdio flush, and pipefail turns that into
+# "this pin is no longer legal" -- moving the tunnel to another country on a
+# run where nothing changed.
 #
-# SIZE IS WHAT GIVES THIS CASE TEETH. The ten-relay fixture cannot catch it: its
-# whole candidate list is about 100 bytes, one stdio flush, so nothing is ever
-# written to a closed pipe and the wrong spelling passes. Measured: with both
-# list checks restored to `| grep -qxF`, the case below on "$J" passed 10 of 10
-# runs. The second fixture is therefore 400 relays, whose candidate lists span
-# several 1 KB flushes; the same mutation fails it 10 of 10.
-#
-# It is the ENTRY check the mutation dies on, and deliberately so:
-# mullvad_relay_match is the only producer here with nothing between it and the
-# pipe. mullvad_exit_candidates ends in `return 0`, which swallows the SIGPIPE
-# death of its own while-loop -- so the exit half of that mutation survives, and
-# for the same reason no early-exit consumer of THAT function is at risk.
+# SIZE IS WHAT GIVES THIS TEETH. The 10-relay fixture fits in one flush, so the
+# wrong spelling passes it 10 of 10. The 400-relay fixture spans several, and
+# the same mutation fails 10 of 10 -- on the ENTRY check, the only producer
+# here with nothing between it and the pipe.
 mullvad_pair_ok "$J" "$S" nl "" bg-sof-wg-001 nl-ams-wg-001 \
   || note "a legal pin whose entry is the first candidate in the list must still be reused"
 
@@ -556,7 +502,7 @@ bigexits="$(mullvad_exit_candidates "$BIGJ" "$BIGS" nl)"
 mullvad_pair_ok "$BIGJ" "$BIGS" nl "" bg-sof-wg-001 nl-ams-wg-001 \
   || note "a legal pin must be reused against a 400-relay list too: piping the candidate list into an early-exit consumer kills the producer with SIGPIPE and pipefail reports a still-legal pin as illegal, which moves the tunnel's country on a run where nothing changed"
 
-echo "the pin's mode:"
+section "the pin's mode:"
 # No key material in it, but it names the country the operator chose. Written
 # create-chmod-write like mullvad_render_to, and checked under a deliberately
 # loose umask so a missing chmod cannot pass by accident of the ambient one.
@@ -581,7 +527,7 @@ rm -f "$PIN_ORDER" "${tmp}/pin-chmod-size"
 [[ "$(cat "${tmp}/pin-chmod-size" 2>/dev/null)" == "0" ]] \
   || note "the pin must be created empty and chmodded BEFORE the hostnames are written; chmod saw a file of $(cat "${tmp}/pin-chmod-size" 2>/dev/null) byte(s), so the operator's chosen country was on disk at the ambient umask first"
 
-echo "mullvad_cache_fresh:"
+section "mullvad_cache_fresh:"
 # A relay cache is never 0 bytes on a real machine (mullvad_load_relays only
 # ever mv's a JSON-validated file into place), but the check itself must not
 # rely on that: it has to say "not fresh" for a 0-byte file on its own, since
@@ -605,21 +551,16 @@ mullvad_cache_fresh "${tmp}/old.json" 7 && note "an 8-day-old cache must not be 
 : > "${tmp}/empty.json"
 mullvad_cache_fresh "${tmp}/empty.json" 7 && note "a 0-byte cache must never read as fresh"
 
-echo "mullvad_load_relays:"
-# Stub the network fetch so these tests never touch the real API.
-# _mullvad_fetch_relays is the seam mullvad-lib.sh provides for exactly this:
-# production always calls it unmodified, tests redefine it after sourcing.
+section "mullvad_load_relays:"
+# Stub the fetch so these tests never touch the real API; production always
+# calls _mullvad_fetch_relays unmodified.
 #
-# The call counter is a FILE, not a shell variable: the "expect die" cases
-# below must run inside a `$(...)` command substitution (die calls `exit`,
-# which would kill this whole test script if invoked as a bare statement in
-# the current shell), and a command substitution is a subshell -- any plain
-# variable a stub increments there is gone the moment it exits. A file write
-# is real I/O and survives across that boundary.
+# The counter is a FILE, not a variable: the "expect die" cases run inside
+# `$(...)`, and a subshell's variables vanish on exit. A file write survives.
 calls="${tmp}/fetch-calls"
 fetch_call_count() { wc -l < "$calls" 2>/dev/null | tr -d ' '; }
 
-echo "  no cache, fetch fails -> fatal:"
+section "  no cache, fetch fails -> fatal:"
 rm -f "$calls"
 _mullvad_fetch_relays() { echo x >> "$calls"; return 1; }
 if out="$(mullvad_load_relays "${tmp}/no-cache.json" 7 2>&1)"; then
@@ -633,7 +574,7 @@ fi
 [[ -e "${tmp}/no-cache.json" ]] \
   && note "a failed fetch with no prior cache must not leave a cache file behind"
 
-echo "  stale but valid cache, fetch fails -> warns and continues:"
+section "  stale but valid cache, fetch fails -> warns and continues:"
 cat > "${tmp}/stale-valid.json" <<'EOF'
 [{"hostname":"se-sto-wg-001","active":true,"ipv4_addr_in":"185.213.154.70","multihop_port":3301,"country_code":"se","city_code":"sto"}]
 EOF
@@ -651,7 +592,7 @@ fi
 [[ "$(mullvad_relay_field "${tmp}/stale-valid.json" se-sto-wg-001 country_code)" == "se" ]] \
   || note "the stale cache's own content must survive on disk when the refetch fails"
 
-echo "  corrupt cache (fresh by mtime), fetch succeeds -> refetch attempted and used:"
+section "  corrupt cache (fresh by mtime), fetch succeeds -> refetch attempted and used:"
 echo 'not json' > "${tmp}/corrupt-fresh.json"
 rm -f "$calls"
 _mullvad_fetch_relays() {
@@ -667,7 +608,7 @@ mullvad_load_relays "${tmp}/corrupt-fresh.json" 7 >/dev/null 2>&1 \
 [[ "$(mullvad_relay_field "${tmp}/corrupt-fresh.json" nl-ams-wg-001 country_code)" == "nl" ]] \
   || note "the refetched content must actually replace the corrupt cache on disk"
 
-echo "  corrupt cache (fresh by mtime), fetch also fails -> fatal:"
+section "  corrupt cache (fresh by mtime), fetch also fails -> fatal:"
 echo 'not json' > "${tmp}/corrupt-fresh-2.json"
 rm -f "$calls"
 _mullvad_fetch_relays() { echo x >> "$calls"; return 1; }
@@ -677,7 +618,7 @@ fi
 [[ "$(fetch_call_count)" -eq 1 ]] \
   || note "a corrupt fresh cache must still attempt exactly one fetch before giving up (got $(fetch_call_count))"
 
-echo "mullvad_render_to:"
+section "mullvad_render_to:"
 mullvad_render_to "$J" "$S" se-sto-wg-001 bg-sof-wg-001 "${tmp}/derived.conf"
 [[ "$(grep -c '^Endpoint = 185.213.154.70:3225$' "${tmp}/derived.conf")" -eq 1 ]] \
   || note "the derived config must point at the entry ip and the exit multihop port"
@@ -704,7 +645,7 @@ rm -f "$DERIVED_ORDER" "${tmp}/render-chmod-size"
 diff <(grep -v '^Endpoint' "${S}/bg-sof-wg-001.conf") <(grep -v '^Endpoint' "${tmp}/derived.conf") >/dev/null \
   || note "the derived config must differ from the exit's config only in Endpoint"
 
-echo "verify.sh exit-country assertion:"
+section "verify.sh exit-country assertion:"
 # This is verify.sh's decision logic, not mullvad-lib.sh's, but it lives here
 # because it is the same feature and this is the suite that already has the
 # vocabulary for it.
@@ -788,21 +729,18 @@ out="$(run_exit_assertion "" bg "$GOODPIN")"
 [[ "$out" == *"fails=1"* ]] \
   || note "an unreadable exit hostname must fail rather than pass by omission (got '${out}')"
 
-# 7. Not applicable, and said out loud. A MULLVAD_WG_CONFIG lab is correct even
-# with a pin left behind by an earlier MULLVAD_EXIT lab -- only `make destroy`
-# clears it -- so applying that pin would fail a good lab while naming a country
-# nobody asked for. It must be ignored, and the transcript must still show the
-# check was considered: an absent line and a disabled check look identical.
+# 7/8. MULLVAD_EXIT is the only mechanism, so a Phase 2 tunnel with an empty
+# MULLVAD_EXIT means nothing states which country was intended. That must FAIL
+# rather than log-and-pass, with or without a leftover pin: a tunnel nobody can
+# check against intent is exactly the "could not tell" this file never scores
+# as a pass.
 out="$(run_exit_assertion nl-ams-wg-001 "" "$GOODPIN")"
-[[ "$out" == *"fails=0"* ]] \
-  || note "a stale pin must not fail a MULLVAD_WG_CONFIG lab (got '${out}')"
-[[ "$out" == *"does not apply"* ]] \
-  || note "a lab with no MULLVAD_EXIT must SAY the country check does not apply, not skip in silence (got '${out}')"
+[[ "$out" == *"fails=1"* ]] \
+  || note "an empty MULLVAD_EXIT must fail even with a pin present (got '${out}')"
 
-# 8. Same, with no pin at all: the ordinary MULLVAD_WG_CONFIG case.
 out="$(run_exit_assertion nl-ams-wg-001 "" "__nopin__")"
-[[ "$out" == *"fails=0"* && "$out" == *"does not apply"* ]] \
-  || note "a MULLVAD_WG_CONFIG lab with no pin must pass and say the check does not apply (got '${out}')"
+[[ "$out" == *"fails=1"* ]] \
+  || note "an empty MULLVAD_EXIT must fail with no pin either (got '${out}')"
 
 # 9. The tunnel matches the PIN exactly, and the pin no longer matches .env.
 # This is what "edit MULLVAD_EXIT, then run make verify to see where I am"

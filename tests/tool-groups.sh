@@ -3,10 +3,9 @@
 # the bridge from KALI_TOOL_GROUPS in lab.conf to the Ansible variable the
 # workstation role installs from.
 #
-# Two things here are load-bearing: a group name ends up on an apt command line
-# inside the guest (the charset rule is what keeps that from being an injection
-# path), and the kali-tools- prefix is prepended by the code, never typed,
-# which is what makes the kali-linux-* umbrellas inexpressible.
+# Load-bearing: a group name reaches an apt command line inside the guest, so
+# the charset rule is the injection guard, and the kali-tools- prefix is added
+# by code rather than typed, which makes the kali-linux-* umbrellas unreachable.
 #
 # Mutation: weaken the charset test to `[[ -n "$g" ]]` (every injection case
 # fails), delete the `kali-*` case (all four umbrella cases fail), or drop the
@@ -18,12 +17,28 @@ cd "$(dirname "$0")/.."
 source scripts/lib.sh
 
 fail=0
-check() { [[ "$1" == "$2" ]] || { echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
+check() { [[ "$1" == "$2" ]] || { _hdr; echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
 # Run a command and check it fails. The if/else keeps the non-zero return --
 # which is the point of half these cases -- from tripping set -e.
-checkfails() { if ( "$@" ) >/dev/null 2>&1; then echo "  FAIL $* should have been rejected"; fail=1; fi; }
+checkfails() { if ( "$@" ) >/dev/null 2>&1; then _hdr; echo "  FAIL $* should have been rejected"; fail=1; fi; }
 
-echo "parse_tool_groups, accepting:"
+section "parse_tool_groups, accepting:"
+# Commas, because the group list in lab.conf.example is printed comma-separated
+# and gets copied verbatim -- that exact paste used to die on '802-11,'.
+check "$(parse_tool_groups 'web, passwords')"      "web
+passwords"  "comma-separated, as the docs print the list"
+check "$(parse_tool_groups 'web,passwords')"       "web
+passwords"  "commas with no spaces"
+check "$(parse_tool_groups 'web,, passwords')"     "web
+passwords"  "a doubled comma is sloppy, not fatal"
+check "$(parse_tool_groups '802-11, bluetooth')"   "802-11
+bluetooth"  "the exact paste that used to fail"
 check "$(parse_tool_groups 'web passwords')"      "web
 passwords"  "two groups, one per line, in order"
 check "$(parse_tool_groups '  web   passwords ')" "web
@@ -34,7 +49,7 @@ check "$(parse_tool_groups 'top10')"              "top10"      "digits are legal
 check "$(parse_tool_groups '802-11')"             "802-11"     "a group may start with a digit"
 check "$(parse_tool_groups 'information-gathering')" "information-gathering" "dashes are legal"
 
-echo "parse_tool_groups, empty:"
+section "parse_tool_groups, empty:"
 # NOTHING, not a blank line. A helper in this repo has already shipped that bug:
 # a bare newline on zero matches made "nothing matched" indistinguishable from
 # one empty result, and every `while read` consumer looped once on an empty
@@ -43,10 +58,10 @@ check "$(parse_tool_groups '' | wc -l | tr -d ' ')"    "0" "an empty selection p
 check "$(parse_tool_groups '   ' | wc -l | tr -d ' ')" "0" "a whitespace-only selection prints no lines at all"
 check "$(KALI_TOOL_GROUPS='' parse_tool_groups | wc -l | tr -d ' ')" "0" "an unset KALI_TOOL_GROUPS prints no lines at all"
 
-echo "parse_tool_groups, reading the environment:"
+section "parse_tool_groups, reading the environment:"
 check "$(KALI_TOOL_GROUPS='web' parse_tool_groups)" "web" "falls back to KALI_TOOL_GROUPS with no argument"
 
-echo "parse_tool_groups, rejecting:"
+section "parse_tool_groups, rejecting:"
 # The four umbrella metapackages are the ones measured to pull openvpn, vpnc,
 # vpnc-scripts (and wireguard-tools, for -everything). They pass the charset
 # rule, so the charset alone is not enough: a name that already carries a kali-
@@ -90,7 +105,7 @@ if echo "$output" | grep -q '^[a-z0-9-]'; then
 fi
 checkfails parse_tool_groups 'web *'
 
-echo "render_tool_groups_var:"
+section "render_tool_groups_var:"
 check "$(render_tool_groups_var 'web passwords')" "workstation_tools_groups: [web, passwords]" "renders a flow list"
 check "$(render_tool_groups_var 'web web')"       "workstation_tools_groups: [web]"            "renders the deduplicated set"
 # An empty selection emits NOTHING, so the tracked group_vars default keeps
@@ -109,4 +124,4 @@ yaml_list() {
 check "$(yaml_list "$(render_tool_groups_var 'web passwords top10')")" "web,passwords,top10" \
   "the rendered variable survives a real YAML parser as a list of three"
 
-if [[ "$fail" == "0" ]]; then echo "  tool-groups OK"; else echo "  tool-groups FAILED"; exit 1; fi
+if [[ "$fail" == "0" ]]; then echo "tool-groups: OK"; else echo "tool-groups: FAILED"; exit 1; fi

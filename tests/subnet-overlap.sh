@@ -10,13 +10,19 @@ cd "$(dirname "$0")/.."
 source scripts/lib.sh
 
 fail=0
-check() { [[ "$1" == "$2" ]] || { echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
+check() { [[ "$1" == "$2" ]] || { _hdr; echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
 # Run a command and check its exit status (0/1/2). The if/else keeps a non-zero
 # return -- which is the whole point of half these cases -- from tripping set -e.
 checkrc() { local want="$1" rc; shift; if "$@" >/dev/null 2>&1; then rc=0; else rc=$?; fi
   [[ "$rc" == "$want" ]] || { echo "  FAIL $* (rc $rc, want $want)"; fail=1; }; }
 
-echo "ip_to_int:"
+section "ip_to_int:"
 check "$(ip_to_int 0.0.0.0)"         "0"          "0.0.0.0 is 0"
 check "$(ip_to_int 255.255.255.255)" "4294967295" "broadcast is 2^32-1"
 check "$(ip_to_int 192.168.128.1)"   "3232268289" "192.168.128.1"
@@ -32,7 +38,7 @@ checkrc 1 ip_to_int 1.2.3.4.5        # too many octets
 checkrc 1 ip_to_int fe.b2.14.5b.c8.64
 checkrc 1 ip_to_int ""
 
-echo "cidr_contains:"
+section "cidr_contains:"
 # The collision that started all this: the VPN gateway inside the vmnet default,
 # i.e. exactly what preflight refuses to build on when HOST_ONLY_SUBNET is that
 # /24 and a VPN pushes a gateway into it.
@@ -57,4 +63,4 @@ checkrc 2 cidr_contains 172.16.20.0/33   172.16.20.1
 checkrc 2 cidr_contains 172.16.20.0/24   not-an-ip
 checkrc 2 cidr_contains garbage          172.16.20.1
 
-[[ "$fail" == 0 ]] && echo "OK" || { echo "FAILED"; exit 1; }
+[[ "$fail" == 0 ]] && echo "subnet-overlap: OK" || { echo "FAILED"; exit 1; }

@@ -27,14 +27,20 @@ export LAB_CONF="${tmpdir}/lab.conf" INVENTORY_FILE_OVERRIDE="$inv" GATEWAY_PORT
 printf '%s\n' \
   "gateway gateway anon-gateway 2201 10.20.0.1 dual" \
   "workstation workstation anon-workstation 0 10.20.0.10 internal" \
-  | scripts/gen-inventory.sh >/dev/null
+  | scripts/gen-inventory.sh >/dev/null 2>&1
 
 fail=0
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
 # -- so a pattern starting with '-' (an ssh flag) is not read as a grep option.
 want()    { grep -Eq -- "$1" "$inv" || { echo "  FAIL $2"; fail=1; }; }
 want_no() { grep -Eq -- "$1" "$inv" && { echo "  FAIL $2"; fail=1; } || true; }
 
-echo "gen-inventory:"
+section "gen-inventory:"
 want 'ansible_port: 2201'                    "gateway is reached on its host forward port"
 want 'ansible_host: 10\.20\.0\.10'           "workstation is addressed by its internal IP"
 want 'ProxyCommand'                          "workstation is reached through a ProxyCommand"

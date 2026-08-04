@@ -11,7 +11,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail=0
-note() { echo "  FAIL $1"; fail=1; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
+note() { _hdr; echo "  FAIL $1"; fail=1; }
 
 # The list in verify.sh, lifted out by name rather than copied: a copy here
 # would keep passing after verify.sh regressed.
@@ -47,4 +53,4 @@ for pkg in openvpn vpnc vpnc-scripts wireguard-tools mullvad-vpn; do
   grep -qx "$pkg" <<<"$ansible_sorted" || note "${pkg} is missing from the watch list"
 done
 
-if [[ "$fail" == "0" ]]; then echo "  vpn-watch-list OK"; else echo "  vpn-watch-list FAILED"; exit 1; fi
+if [[ "$fail" == "0" ]]; then echo "vpn-watch-list: OK"; else echo "vpn-watch-list: FAILED"; exit 1; fi

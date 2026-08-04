@@ -29,9 +29,15 @@ source scripts/lib.sh
 load_config
 
 fail=0
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
 want() { grep -Eq -- "$2" <<<"$1" || { echo "  FAIL $3"; fail=1; }; }
 
-echo "ssh_jump_proxycommand:"
+section "ssh_jump_proxycommand:"
 pc="$(ssh_jump_proxycommand 2301)"
 want "$pc" '^ssh -W %h:%p'                     "is a -W stdio forward"
 want "$pc" '-p 2301'                           "targets the gateway's host port"
@@ -43,12 +49,12 @@ want "$pc" "${tmpdir}/id_ed25519_anon"         "uses the private key, not the .p
 want "$pc" 'StrictHostKeyChecking=no'          "hop does not fall back to ask (the outage)"
 want "$pc" 'UserKnownHostsFile=/dev/null'      "hop ignores the operator's known_hosts"
 
-echo "gen-inventory uses the same definition:"
+section "gen-inventory uses the same definition:"
 # Any second, hand-rolled copy of the ProxyCommand can drift back into the bug,
 # so the generated inventory must contain this exact string.
 inv="${tmpdir}/hosts.yaml"
 INVENTORY_FILE_OVERRIDE="$inv" GATEWAY_PORT=2301 \
-  scripts/gen-inventory.sh >/dev/null <<'ROWS'
+  scripts/gen-inventory.sh >/dev/null 2>&1 <<'ROWS'
 gateway gateway anon-gateway 2301 10.20.0.1 dual
 workstation workstation anon-workstation 0 10.20.0.10 internal
 ROWS

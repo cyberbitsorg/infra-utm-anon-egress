@@ -10,12 +10,16 @@ LAB_RAM=2048
 LAB_DISK_GB=20
 
 fails=0
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
 
 # check <label> <expected> <actual>
 check() {
-  if [[ "$2" == "$3" ]]; then
-    printf '  ok   %s\n' "$1"
-  else
+  if [[ "$2" != "$3" ]]; then
     printf '  FAIL %s: expected "%s", got "%s"\n' "$1" "$2" "$3"
     fails=$((fails + 1))
   fi
@@ -27,12 +31,10 @@ expect_reject() {
   if ( parse_vm_entry "$2" ) >/dev/null 2>&1; then
     printf '  FAIL %s: parser accepted "%s"\n' "$1" "$2"
     fails=$((fails + 1))
-  else
-    printf '  ok   %s\n' "$1"
   fi
 }
 
-echo "parse_vm_entry:"
+section "parse_vm_entry:"
 
 parse_vm_entry "gateway:gateway"
 check "bare entry keeps name"     "gateway" "$VM_SHORT"
@@ -77,8 +79,7 @@ expect_reject "negative value"       "box:role cpu=-2"
 expect_reject "field without ="      "box:role bogus"
 expect_reject "empty name"          ":role cpu=2"
 
-echo
-echo "require_lab_conf_vars:"
+section "require_lab_conf_vars:"
 
 # A complete lab.conf, so each check below fails on exactly one missing var.
 LAB_PREFIX="anon"
@@ -102,9 +103,7 @@ expect_config_reject() {
   if [[ "$out" == *"unbound variable"* ]]; then
     printf '  FAIL %s: died with "unbound variable" instead of a clean message: %s\n' "$label" "$out"
     fails=$((fails + 1))
-  elif [[ "$out" == *"$var"* && "$out" == *"missing in lab.conf"* ]]; then
-    printf '  ok   %s\n' "$label"
-  else
+  elif [[ "$out" != *"$var"* || "$out" != *"missing in lab.conf"* ]]; then
     printf '  FAIL %s: unexpected message: %s\n' "$label" "$out"
     fails=$((fails + 1))
   fi
@@ -114,16 +113,12 @@ expect_config_reject "missing LAB_CPU dies cleanly"      "LAB_CPU"
 expect_config_reject "missing LAB_RAM dies cleanly"      "LAB_RAM"
 expect_config_reject "missing LAB_DISK_GB dies cleanly"  "LAB_DISK_GB"
 
-if ( require_lab_conf_vars ) >/dev/null 2>&1; then
-  printf '  ok   %s\n' "complete config passes"
-else
+if ! ( require_lab_conf_vars ) >/dev/null 2>&1; then
   printf '  FAIL %s\n' "complete config passes: require_lab_conf_vars rejected a full set of vars"
   fails=$((fails + 1))
 fi
-
-echo
 if [[ "$fails" -eq 0 ]]; then
-  ok "parse_vm_entry: all tests passed"
+  echo "parse-vm-entry: OK"
 else
   die "parse_vm_entry: ${fails} test(s) failed"
 fi

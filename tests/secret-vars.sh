@@ -9,7 +9,13 @@ cd "$(dirname "$0")/.."
 source scripts/lib.sh
 
 fail=0
-note() { echo "  FAIL $1"; fail=1; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
+note() { _hdr; echo "  FAIL $1"; fail=1; }
 
 # yaml_value <yaml> <key>: read a key back with a real YAML parser, so the test
 # proves what Ansible will actually see rather than what the string looks like.
@@ -20,7 +26,7 @@ yaml_value() {
   ' "$2" <<<"$1"
 }
 
-echo "render_secret_vars:"
+section "render_secret_vars:"
 
 # A password with every character that breaks naive quoting: single quotes,
 # double quotes, a backslash, a #, a $, a colon-space, and leading/trailing space.
@@ -50,16 +56,7 @@ ruby -ryaml -e 'd = YAML.safe_load(STDIN.read); exit(d.nil? || d.is_a?(Hash) ? 0
 [[ "$(grep -c "simple123" <<<"$got")" == "1" ]] \
   || note "a secret appears more than once (a comment or echo is leaking it)"
 
-# MULLVAD_WG_CONFIG is a path, not a secret, but it travels the same channel so
-# there is one way in and one way out for everything .env carries.
-got_cfg="$(MULLVAD_WG_CONFIG="secrets/mullvad-wg.conf" render_secret_vars)"
-[[ "$(yaml_value "$got_cfg" mullvad_wg_config)" == "secrets/mullvad-wg.conf" ]] \
-  || note "MULLVAD_WG_CONFIG does not round-trip"
-got_nocfg="$(MULLVAD_WG_CONFIG="" render_secret_vars)"
-[[ "$(yaml_value "$got_nocfg" mullvad_wg_config)" == "<<MISSING>>" ]] \
-  || note "an empty MULLVAD_WG_CONFIG must not be emitted"
-
-echo "vars_or_empty_mapping:"
+section "vars_or_empty_mapping:"
 
 # The actual regression: ansible-playbook must ACCEPT the file produced for a
 # fully-empty render, not merely "is valid YAML" -- a blank/whitespace-only

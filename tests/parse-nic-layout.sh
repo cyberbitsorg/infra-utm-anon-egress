@@ -10,9 +10,15 @@ LAB_SEGMENT="10.20.0.0/24"; GATEWAY_INTERNAL_IP="10.20.0.1"
 source scripts/lib.sh
 
 fail=0
-check() { [[ "$1" == "$2" ]] || { echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
 
-echo "nic_layout_for_role / internal_ip_for:"
+check() { [[ "$1" == "$2" ]] || { _hdr; echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
+
+section "nic_layout_for_role / internal_ip_for:"
 
 check "$(nic_layout_for_role gateway)"     "dual"       "gateway is dual-NIC"
 check "$(nic_layout_for_role workstation)" "internal"   "workstation is internal-only"
@@ -29,13 +35,13 @@ check "$(internal_ip_for extra 3)"          "10.20.0.13" "extra internal VM fall
 check "$(GATEWAY_INTERNAL_IP=10.20.0.254 internal_ip_for gateway 1)" "10.20.0.254" \
   "gateway IP honours GATEWAY_INTERNAL_IP"
 
-echo "ssh_port_for:"
+section "ssh_port_for:"
 # The base must NOT be the sibling lab's 2200: two fleets up at once would fight
 # over the same host socket, and 'make ssh gateway' could land on the lab's Kali.
 check "$(ssh_port_for 1)" "2301" "index 1 gets 2301"
 check "$(ssh_port_for 3)" "2303" "port follows the index"
 
-echo "role_image:"
+section "role_image:"
 IMAGES_DIR="/img"
 DEBIAN_IMG_URL="https://example.invalid/debian-13-generic-arm64.qcow2"
 KALI_IMG_FILE="kali-genericcloud-arm64.raw"

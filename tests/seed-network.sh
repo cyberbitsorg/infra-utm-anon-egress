@@ -10,13 +10,19 @@ source scripts/lib.sh
 source scripts/make-seed-lib.sh
 
 fail=0
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
+
 want()    { grep -Eq "$2" <<<"$1" || { echo "  FAIL $3"; fail=1; }; }
 want_no() { grep -Eq "$2" <<<"$1" && { echo "  FAIL $3"; fail=1; } || true; }
 
 gw="$(render_network_config gateway 52:54:00:AA:00:01 52:54:00:10:20:01 10.20.0.1 dual)"
 ws="$(render_network_config workstation "" 52:54:00:10:20:02 10.20.0.10 internal)"
 
-echo "gateway (dual):"
+section "gateway (dual):"
 want "$gw" '52:54:00:AA:00:01'            "gateway matches the NAT NIC by MAC"
 want "$gw" '10\.0\.2\.15/24'              "gateway WAN NIC is statically addressed"
 want "$gw" 'via: 10\.0\.2\.2'             "gateway WAN default route is the SLIRP gateway"
@@ -28,7 +34,7 @@ want "$gw" '52:54:00:10:20:01'            "gateway matches the internal NIC by M
 # WireGuard.
 want_no "$gw" 'dhcp4: true'               "gateway must NOT use DHCP on the WAN NIC"
 
-echo "workstation (internal-only):"
+section "workstation (internal-only):"
 want "$ws" '10\.20\.0\.10/24'             "workstation has its internal segment address"
 want "$ws" '52:54:00:10:20:02'            "workstation matches the internal NIC by MAC"
 # The default route may be written either as the modern routes: form or the

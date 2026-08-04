@@ -10,10 +10,16 @@ cd "$(dirname "$0")/.."
 source scripts/lib.sh
 
 fail=0
-check() { [[ "$1" == "$2" ]] || { echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
-checkfails() { if ( "$@" ) >/dev/null 2>&1; then echo "  FAIL $* should have been rejected"; fail=1; fi; }
+sec=""
+# Section labels are held back and only printed when something under them
+# fails, so a green run is one line per file instead of a wall of headings.
+section() { sec="$1"; }
+_hdr() { [[ -n "$sec" ]] && { echo "$sec"; sec=""; }; return 0; }
 
-echo "render_bool_var:"
+check() { [[ "$1" == "$2" ]] || { _hdr; echo "  FAIL $3 (got '$1', want '$2')"; fail=1; }; }
+checkfails() { if ( "$@" ) >/dev/null 2>&1; then _hdr; echo "  FAIL $* should have been rejected"; fail=1; fi; }
+
+section "render_bool_var:"
 check "$(render_bool_var workstation_clipboard yes)"  "workstation_clipboard: true"  "yes -> true"
 check "$(render_bool_var workstation_clipboard no)"   "workstation_clipboard: false" "no -> false"
 check "$(render_bool_var workstation_clipboard TRUE)" "workstation_clipboard: true"  "case-insensitive"
@@ -33,4 +39,4 @@ checkfails render_bool_var workstation_clipboard y
 checkfails render_bool_var workstation_clipboard "true "
 checkfails render_bool_var workstation_clipboard 2
 
-[[ "$fail" == 0 ]] && echo "  bool-var OK" || { echo "  bool-var FAILED"; exit 1; }
+[[ "$fail" == 0 ]] && echo "bool-var: OK" || { echo "bool-var: FAILED"; exit 1; }
