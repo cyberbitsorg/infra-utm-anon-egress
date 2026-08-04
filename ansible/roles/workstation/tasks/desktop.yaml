@@ -81,24 +81,14 @@
     state: absent
 
 - name: Take NetworkManager's hands off the network
-  # NetworkManager is a hard dependency of the desktop, so it WILL be
-  # installed. Not masked: with no managed device and no DNS control it can do
-  # no harm, and masking only leaves a broken-looking applet.
+  # The desktop hard-depends on NetworkManager, so it WILL be installed; with
+  # no managed device and no DNS control it can do no harm. dns=none keeps it
+  # off resolv.conf, and connectivity.enabled=false stops Debian's probe to
+  # network-test.debian.org -- not an IP leak, but a recurring beacon on the
+  # one host whose job is to be indistinguishable.
   #
-  #   dns=none                 it must not rewrite /etc/resolv.conf, which
-  #                            points at the gateway's unbound -- the only
-  #                            resolver the forward chain permits.
-  #   unmanaged-devices        the NIC is static, configured by cloud-init.
-  #   connectivity.enabled     Debian ships a drop-in pointing the checker at
-  #                            network-test.debian.org. Not an IP leak (it
-  #                            would go through the tunnel), but a recurring,
-  #                            distinctively-shaped beacon on the one host
-  #                            whose job is to be indistinguishable.
-  #
-  # Filename is 99-, NOT 00-: NetworkManager reads conf.d/*.conf in
-  # alphabetical order and the LAST file wins. A 00- prefix would make this the
-  # weakest file, so any later drop-in (a packaged one, a future Kali update)
-  # would silently hand back the NIC and resolv.conf. Do not renumber this.
+  # 99-, NOT 00-: conf.d is read alphabetically and the LAST file wins, so a
+  # 00- prefix would let any later drop-in hand back the NIC and resolv.conf.
   ansible.builtin.copy:
     dest: /etc/NetworkManager/conf.d/99-anon-egress-unmanaged.conf
     owner: root
@@ -140,19 +130,11 @@
       autologin-user-timeout=0
 
 - name: Install the Kali XFCE desktop
-  # WITH recommends, deliberately: measured ~950 packages versus 537 without,
-  # and the extra fonts, codecs and utilities are what keep a desktop
-  # metapackage from being subtly broken. The cost is that recommends also
-  # pull NetworkManager VPN plugins, which tools.yaml purges -- they are
-  # Recommends, not Depends, so removing them cannot cascade.
-  #
-  # The longest single operation in the repo, every byte through the tunnel.
-  # Expect many minutes with no output; ansible.cfg's keepalives are what keep
-  # that from looking like a hang.
-  #
-  # No cache_valid_time: a FAILED apt update still refreshes the timestamp, and
-  # the next hour of retries would report the useless "No package matching
-  # 'kali-desktop-xfce' is available".
+  # WITH recommends (~950 packages vs 537): without them the desktop is subtly
+  # broken. They also pull the NetworkManager VPN plugins tools.yaml purges.
+  # The longest operation in the repo, every byte through the tunnel, with no
+  # output for minutes. No cache_valid_time: a failed update still refreshes
+  # the timestamp and the next hour of retries would report a useless error.
   ansible.builtin.apt:
     name: kali-desktop-xfce
     state: present
@@ -163,6 +145,23 @@
 # this file first, so a purge here would run before tools.yaml's simulate-first
 # guard had a chance to check whether it would take a requested tool group down
 # with it. That guard runs unconditionally, so it already covers this list.
+
+- name: Install or remove the SPICE guest agent (host clipboard sharing)
+  # BEFORE lightdm starts: the per-session half autostarts with the session, so
+  # a package that lands later leaves the clipboard dead until the next login.
+  # Removed rather than skipped when off, so flipping the flag really closes it.
+  ansible.builtin.apt:
+    name: spice-vdagent
+    state: "{{ 'present' if (workstation_clipboard | default(false) | bool) else 'absent' }}"
+    purge: true
+  notify: Restart the display manager
+
+- name: Enable the SPICE agent daemon
+  ansible.builtin.systemd_service:
+    name: spice-vdagentd
+    enabled: true
+    state: started
+  when: workstation_clipboard | default(false) | bool
 
 - name: Read the current default systemd target
   ansible.builtin.command: systemctl get-default
@@ -184,21 +183,6 @@
     name: lightdm
     enabled: true
     state: started
-
-- name: Install or remove the SPICE guest agent (host clipboard sharing)
-  # UTM supplies the host half already; only this package was missing. Removed
-  # rather than skipped when off, so flipping the flag really closes it.
-  ansible.builtin.apt:
-    name: spice-vdagent
-    state: "{{ 'present' if (workstation_clipboard | default(false) | bool) else 'absent' }}"
-    purge: true
-
-- name: Enable the SPICE agent daemon
-  ansible.builtin.systemd_service:
-    name: spice-vdagentd
-    enabled: true
-    state: started
-  when: workstation_clipboard | default(false) | bool
 
 - name: Install Mullvad's repository signing key
   # ASCII-armoured under /usr/share/keyrings and referenced by `signed-by=`

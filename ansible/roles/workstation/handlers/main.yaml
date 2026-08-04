@@ -14,3 +14,12 @@
   ansible.builtin.reboot:
     reboot_timeout: 600
   when: "'cloud' in ansible_kernel"
+
+- name: Restart the display manager
+  # Only fires when the SPICE agent was installed or removed. The per-session
+  # agent starts with the session, so an existing desktop login must be ended
+  # for the change to take effect.
+  ansible.builtin.systemd_service:
+    name: lightdm
+    state: restarted
+  when: workstation_desktop | default(false) | bool
