@@ -5,9 +5,8 @@
 # Prefix for all VM names in UTM (the gateway becomes "anon-gateway").
 LAB_PREFIX="anon"
 
-# User created inside every VM by cloud-init; Ansible connects as this user.
-# Avoid a name that is already a system group in the guest (operator, staff,
-# games, users): the template handles the clash, but a free name is simpler.
+# User created inside every VM; Ansible connects as this user. Avoid a name
+# that is already a system group in the guest (operator, staff, games, users).
 LAB_USER="anon"
 
 # Public SSH key injected into every VM. `make preflight` generates one if the
@@ -15,26 +14,19 @@ LAB_USER="anon"
 LAB_SSH_KEY="${HOME}/.ssh/id_ed25519_anon.pub"
 
 # --- Networking -------------------------------------------------------------
-# The NIC layout is per role and NOT configurable here, because the security
-# property depends on it (scripts/lib.sh, nic_layout_for_role):
-#
-#   gateway      dual     an emulated NAT NIC (internet + the host SSH forward)
-#                         AND a host-mode NIC at GATEWAY_INTERNAL_IP.
-#   everything   internal ONLY a host-mode NIC on LAB_SEGMENT: no NAT NIC, so
-#   else                  no path to the internet except through the gateway.
-#                         Reached from the host by ProxyJump, never a forward.
+# The NIC layout is per role and deliberately NOT configurable here, because
+# the security property depends on it: the gateway gets NAT plus the internal
+# segment, everything else gets ONLY the internal NIC and so has no path out
+# except through the gateway (scripts/lib.sh, nic_layout_for_role).
 LAB_SEGMENT="10.20.0.0/24"
 GATEWAY_INTERNAL_IP="10.20.0.1"
 
-# The vmnet host-only SWITCH has its own subnet, assigned by macOS (default
-# 192.168.128.0/24) and separate from LAB_SEGMENT above. It matters because a
-# live route whose gateway falls inside it -- classically a VPN's -- gets bound
-# to UTM's bridge instead, and that traffic silently disappears.
-#
-# On current macOS the subnet cannot reliably be moved, so declare what the
-# bridge actually uses here and let `make preflight` refuse to build while a
-# route collides. The fix is operational: bring the VPN (or the VMs) down
-# first. See README "Host-only subnet".
+# The vmnet host-only SWITCH has its own subnet, assigned by macOS and separate
+# from LAB_SEGMENT. A live route whose gateway falls inside it (classically a
+# VPN's) gets bound to UTM's bridge instead and silently disappears. macOS
+# will not reliably let you move it, so declare what the bridge actually uses
+# and let `make preflight` refuse to build while a route collides; the fix is
+# to bring the VPN or the VMs down first. See README "Host-only subnet".
 HOST_ONLY_SUBNET="192.168.128.0/24"
 
 # --- Resource defaults ------------------------------------------------------
@@ -47,40 +39,34 @@ LAB_DISK_GB=20
 # The gateway runs Debian, the workstation Kali (chosen per role in
 # scripts/lib.sh, role_image).
 #
-# Debian's "generic" variant, NOT "genericcloud": genericcloud ships the
-# cut-down cloud kernel, which has no DRM drivers, so UTM's display stays dead
-# ("Display output is not active"). "generic" costs a few hundred MB more and
-# gives a working console from first boot. Debian publishes SHA512SUMS, hence
-# DEBIAN_SHA_ALGO.
+# "generic", NOT "genericcloud": the cloud kernel has no DRM drivers, so UTM's
+# display stays dead. A few hundred MB more for a working console from first
+# boot. Debian publishes SHA512SUMS, hence DEBIAN_SHA_ALGO.
 #
-# trixie (Debian 13) is current stable. The suite name is in the path, so
-# moving releases means changing both URLs together; "latest" within a release
-# is a rolling pointer to that release's newest build, and fetch-images.sh
-# re-verifies the image against the SHA512SUMS it fetches alongside it.
+# The release name is in the path, so moving releases means changing both URLs
+# together; "latest" is a rolling pointer within one release.
 DEBIAN_IMG_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-arm64.qcow2"
 DEBIAN_SHA_URL="https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
 DEBIAN_SHA_ALGO=512
 
-# Kali ships a .tar.xz containing a raw disk; fetch-images.sh verifies the
-# archive, extracts it and renames it to KALI_IMG_FILE. The raw image is
-# ~25 GiB, already larger than LAB_DISK_GB, and is never shrunk.
-#
-# The URLs point at the per-release directory, NOT current/, which 404s the
-# moment Kali cuts a release. Pick any release listed at
-# https://kali.download/cloud-images/ (old ones move to old.kali.org).
+# Kali ships a .tar.xz holding a raw disk that fetch-images.sh verifies and
+# extracts. It is ~25 GiB, already larger than LAB_DISK_GB, and never shrunk.
+# The URLs use the per-release directory, not current/, which 404s the moment
+# Kali cuts a release. Releases: https://kali.download/cloud-images/
 KALI_VERSION="2026.2"
 KALI_IMG_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/kali-linux-${KALI_VERSION}-cloud-genericcloud-arm64.tar.xz"
 KALI_SHA_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/SHA256SUMS"
 KALI_IMG_FILE="kali-genericcloud-arm64.raw"
 
 # --- Kali toolset -----------------------------------------------------------
-# Which Kali function groups the workstation gets, space separated, WITHOUT the
-# kali-tools- prefix. Empty (the default) is a bare Kali with the desktop and
-# Mullvad Browser.
+# Which Kali function groups the workstation gets, WITHOUT the kali-tools-
+# prefix. Separate with spaces or commas, so the list below can be pasted as
+# is. Empty (the default) is a bare Kali with the desktop and Mullvad Browser.
 #
-# Every package is downloaded through the gateway's multihop tunnel, which is
-# the point and also why it is slow: a group is 2 to 650 packages (gpu 2,
-# detect 11, passwords 279, top10 301, web 609, vulnerability 650).
+# Everything downloads through the tunnel, which is the point and also why it
+# is slow: 2 to 650 packages per group (gpu 2, detect 11, passwords 279,
+# top10 301, web 609, vulnerability 650). Selecting all of them is hours of
+# apt over a multihop VPN and tens of GB -- raise disk= to match.
 #
 # Groups: 802-11, bluetooth, crypto-stego, database, detect, exploitation,
 # forensics, fuzzing, gpu, hardware, identify, information-gathering,
@@ -89,11 +75,8 @@ KALI_IMG_FILE="kali-genericcloud-arm64.raw"
 # top10, voip, vulnerability, web, windows-resources, wireless.
 #
 # The kali-linux-* umbrellas are deliberately NOT selectable: all four pull
-# openvpn and vpnc onto a host that must never hold a VPN client, and
-# `make verify` would fail on them.
-#
-# sdr, rfid, bluetooth, hardware and 802-11 install fine but have no device to
-# talk to in a VM with one virtual NIC.
+# openvpn and vpnc onto a host that must never hold a VPN client. sdr, rfid,
+# bluetooth, hardware and 802-11 install fine but have no device to talk to.
 KALI_TOOL_GROUPS=""
 
 # --- Host clipboard ----------------------------------------------------------
@@ -120,18 +103,14 @@ WORKSTATION_CLIPBOARD="no"
 # --- VM fleet ---------------------------------------------------------------
 # Each entry: "name:role [cpu=N] [ram=MiB] [disk=GB]"
 #
-#   name   short name; the UTM VM is LAB_PREFIX-name, and this is what
-#          'make ssh' and the Ansible inventory use
-#   role   maps to a base image, a NIC layout, a cloud-init seed and an
-#          Ansible group
+#   name   the UTM VM is LAB_PREFIX-name; 'make ssh' and the inventory use it
+#   role   picks the base image, NIC layout, cloud-init seed and Ansible group
 #
-# The gateway MUST be the first entry: its host SSH port is 2300+index, and
-# both the workstation's ProxyJump and scripts/verify.sh derive it from index 1.
+# The gateway MUST be first: its host SSH port is 2300+index, and both the
+# workstation's ProxyJump and verify.sh derive it from index 1.
 #
-# Changing cpu= or ram= makes the next 'make up' restart that VM; VMs whose
-# cpu/ram did not change are never restarted. disk= applies only at creation
-# (UTM imports the staged disk into its own bundle), so growing an existing VM
-# means 'make destroy' then 'make up'. Disks are never shrunk.
+# cpu= and ram= changes restart that VM on the next 'make up'. disk= applies
+# only at creation, so growing one means 'make destroy' then 'make up'.
 LAB_VMS=(
   "gateway:gateway cpu=2 ram=2048 disk=20"
   "workstation:workstation cpu=4 ram=4096 disk=60"
