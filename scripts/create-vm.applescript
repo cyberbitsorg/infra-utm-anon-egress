@@ -1,16 +1,13 @@
 -- Create one QEMU aarch64 VM in UTM from an existing disk + cloud-init seed.
 --
 -- The NIC layout is PER ROLE and is the security property of this repo:
---   "dual" (gateway only): net0 "emulated" (SLIRP NAT; the ONLY mode where the
---   hostfwd works -- vmnet-shared silently ignores port forwards) plus net1
---   "host" (the isolated internal segment).
---   "internal" (everything else): one "host" NIC and NOTHING ELSE -- no NAT,
---   no forward, no path off the segment. All "host" NICs share one vmnet L2
---   switch with no gateway of its own.
+--   "dual" (gateway only): net0 "emulated" (SLIRP NAT -- the only mode where
+--   the hostfwd works) plus net1 "host", the isolated segment.
+--   "internal" (everything else): one "host" NIC and NOTHING ELSE, so no path
+--   off the segment. All "host" NICs share one vmnet switch with no gateway.
 --
--- This file and vm-config.applescript are the only integration points with
--- UTM; if a future UTM version rejects a property key, adjust it here only
--- (dictionary: docs.getutm.app/scripting/reference).
+-- With vm-config.applescript the only integration point with UTM: if a future
+-- version rejects a property key, adjust it here only.
 on run argv
 	set vmName to item 1 of argv
 	set diskPath to item 2 of argv

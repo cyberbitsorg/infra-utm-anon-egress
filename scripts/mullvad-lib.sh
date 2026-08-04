@@ -27,20 +27,13 @@ mullvad_spec_matches() {
   return 1
 }
 
-# ---------------------------------------------------------------------------
 # Derived lookup table (<json>.tbl): the relay JSON parsed once into a flat
-# file awk and the shell read directly, instead of a python3 spawn per lookup
-# (~540 spawns and ~26 s per resolution against the live list).
-#
-# Line 1 stamps format version + size/mtime of the JSON; any difference
-# rebuilds, so the table can never answer for a list it was not built from.
-# Format, tab-separated:
+# file, instead of a python3 spawn per lookup (~540 spawns, ~26 s per resolve).
+# Line 1 stamps format version + size/mtime, so it can never answer for a list
+# it was not built from. Tab-separated, 0600:
 #   H<TAB><hostname>                       every ACTIVE relay, sorted
 #   F<TAB><hostname><TAB><key><TAB><value> fields of the FIRST relay per hostname
-# Hostnames/keys carrying a separator (and values carrying a newline) are
-# dropped rather than written, so a crafted relay list cannot forge records.
-# Written 0600 like everything else under generated/.
-# ---------------------------------------------------------------------------
+# Anything carrying a separator is dropped, so a crafted list cannot forge rows.
 
 # Bump whenever the writer's output changes meaning; discards existing tables.
 MULLVAD_TABLE_FORMAT=2

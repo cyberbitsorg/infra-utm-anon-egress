@@ -1,30 +1,22 @@
 #!/usr/bin/env bash
 # Assert the security property this repo exists for. Hard-fails on any leak.
-#
-# The phase is detected from the gateway itself, never from a flag:
-#   Phase 1 (no tunnel configured): the workstation reaches the gateway and
-#   nothing else. Phase 2 (a tunnel exists): the workstation has egress, and
-#   ONLY through the tunnel -- including an active kill-switch test that drops
-#   the tunnel and watches the WAN NIC directly.
+# The phase is detected from the gateway, never from a flag: no tunnel means
+# Phase 1 (zero egress), a tunnel means Phase 2 (egress ONLY through it).
 #
 # THE RULE THIS FILE IS BUILT AROUND: silence is never scored as security.
-# Every probe must be able to say "I ran and the answer was no" separately
-# from "I did not run"; anything ambiguous is reported as a FAILURE.
+# Every probe must distinguish "I ran and the answer was no" from "I did not
+# run"; anything ambiguous is a FAILURE. Both phases assert NEGATIVES, so this
+# proves these specific vectors are closed, not that you are anonymous.
 #
-# Both phases assert NEGATIVES, so this is proof that these specific vectors
-# are closed -- not proof of anonymity.
-#
-# No packages are needed in the guests: probes use bash's /dev/tcp, ping and
-# python3, which both images ship. The gateway needs tcpdump, which its role
-# installs for exactly this reason.
+# Guests need no extra packages (/dev/tcp, ping, python3); the gateway needs
+# tcpdump, which its role installs for this.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # Sourced for MULLVAD_PIN_FILE and mullvad_spec_matches, so the pin's location
 # and the matching rule live in exactly one place. Pure functions; sourcing
 # runs nothing.
 source "$(dirname "${BASH_SOURCE[0]}")/mullvad-lib.sh"
 load_config
-# .env is read for one fact: which mechanism built this lab (MULLVAD_EXIT vs
-# MULLVAD_WG_CONFIG), which decides whether the exit-country assertion applies.
+# .env is read for one fact: MULLVAD_EXIT, the country the operator asked for.
 load_env
 
 # Resolve the gateway's host port and the internal-only VMs from the fleet, the
@@ -423,10 +415,7 @@ while read -r short role vm_idx; do
     ok "${short} egresses via a Mullvad exit (${ws_pub_ip}${exit_host:+, ${exit_host}})"
     # >>> exit-country assertion (extracted verbatim by tests/mullvad-select.sh) >>>
     # Egressing via SOME Mullvad exit is not the claim: the operator chose a
-    # country, and intent and observation must be compared. Which mechanism
-    # built the lab decides whether the comparison applies, and only .env says
-    # which -- a stale pin left over after switching to MULLVAD_WG_CONFIG must
-    # not fail a correct lab.
+    # country, and intent and observation must be compared.
     if [[ -n "${MULLVAD_EXIT:-}" ]]; then
       pinned_exit=""
       if [[ -f "$MULLVAD_PIN_FILE" ]]; then
@@ -450,9 +439,9 @@ while read -r short role vm_idx; do
         note_fail "${short} egresses via ${exit_host} but ${pinned_exit} was selected: the tunnel is not in the country you chose"
       fi
     else
-      # Said out loud rather than skipped in silence: "does not apply" and
-      # "switched off" must never be indistinguishable.
-      log "Exit-country assertion does not apply to ${short}: this lab is built from MULLVAD_WG_CONFIG, so no country was selected to compare against (any ${MULLVAD_PIN_FILE} left over from an earlier lab is ignored)"
+      # A tunnel exists but .env names no exit, so nothing can say where this
+      # lab was meant to come out. Not a skip: "could not tell" is a failure.
+      note_fail "${short} egresses via Mullvad but MULLVAD_EXIT is empty in .env, so nothing states which country this lab was built for and the exit cannot be checked against intent"
     fi
     # <<< exit-country assertion <<<
   else
