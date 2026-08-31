@@ -1,0 +1,43 @@
+---
+# Entered from the playbook's rotation play (tasks_from: rotation), BEFORE any
+# play whose tasks need egress. Reuses nic-facts / wg-conf-deploy /
+# nftables-ruleset-deploy so there is exactly one definition of the deployed
+# ruleset and config; the role's handlers are in scope, which is why this runs
+# as the role rather than as loose tasks in the play.
+- name: Check whether this gateway is already built
+  ansible.builtin.stat:
+    path: "/etc/wireguard/{{ wg_interface }}.conf"
+  register: anon_wg_conf_present
+
+- name: Check whether unbound is installed
+  ansible.builtin.stat:
+    path: /etc/unbound/unbound.conf.d/anon-egress.conf
+  register: anon_unbound_installed
+
+- name: Rotate the tunnel credentials
+  when:
+    - mullvad_wg_sanitized | default('') | length > 0
+    - anon_wg_conf_present.stat.exists
+  block:
+    - name: Identify the NICs
+      ansible.builtin.include_tasks: nic-facts.yaml
+
+    - name: Deploy the new WireGuard config
+      ansible.builtin.include_tasks: wg-conf-deploy.yaml
+
+    - name: Deploy the ruleset naming the new endpoint
+      ansible.builtin.include_tasks: nftables-ruleset-deploy.yaml
+
+    # Handlers fire in definition order (nftables reload before the WireGuard
+    # restart), here rather than at end of a later play.
+    - name: Apply the rotation now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Restart unbound if it is installed
+      # Its upstream queries wedge when the tunnel has been dead for a while;
+      # a restart clears the state. It cannot leak: the config has no fallback
+      # forwarder, only the in-tunnel resolver.
+      ansible.builtin.systemd_service:
+        name: unbound
+        state: restarted
+      when: anon_unbound_installed.stat.exists

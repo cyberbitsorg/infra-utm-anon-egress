@@ -2,9 +2,11 @@
 # Configures the two VMs after provisioning. Idempotent: safe to re-run.
 # Run subsets with tags, e.g. --tags gateway or --tags workstation.
 #
-# ORDER MATTERS twice over: the workstation is reached through the gateway
-# (reachability), and it has no route to a mirror until the gateway play brings
-# up the tunnel (egress). That is why the base play is SPLIT: `common` runs on
+# ORDER MATTERS three times over: the workstation is reached through the
+# gateway (reachability); it has no route to a mirror until the gateway play
+# brings up the tunnel (egress); and on an ALREADY-BUILT gateway, rotated
+# tunnel credentials must be applied before anything needs egress (the
+# rotation play below). That is why the base play is SPLIT: `common` runs on
 # the gateway before the gateway play, and on the internal-only hosts after it.
 
 - name: Wait for first boot on all hosts
@@ -28,8 +30,36 @@
           Check /var/log/cloud-init.log -- something in the seed did not apply.
       when: anon_cloud_init.rc == 2
 
+- name: Rotate the tunnel on an already-built gateway
+  # Credential rotation (new Mullvad account, new exit country) must take
+  # effect BEFORE any task that needs egress -- and on a built gateway that is
+  # everything, apt first among them, because the kill-switch fail-closes all
+  # of it through the OLD tunnel. Without this play, `make up` after a rotation
+  # wedges at "Update the apt cache" forever: the new config sits in the
+  # gateway role that apt can never reach.
+  #
+  # Fresh gateways skip it (/etc/wireguard/wg0.conf does not exist yet), so the
+  # provisioning ordering below -- apt while the kill-switch is still down --
+  # is untouched. Fail-closed both ways: a BAD rotation still hangs at apt
+  # rather than leaking, by design.
+  hosts: role_gateway
+  become: true
+  gather_facts: true
+  tags: [gateway, vpn]
+  # Run through the gateway role (import_role + tasks_from: rotation) rather
+  # than including its task files here directly: the snippets notify the
+  # role's HANDLERS, which are only in scope inside the role. (import_role,
+  # not a play-level roles entry: that form silently ignores tasks_from and
+  # runs the role's main.yaml instead.)
+  tasks:
+    - name: Run the gateway role's rotation entry point
+      ansible.builtin.import_role:
+        name: gateway
+        tasks_from: rotation
+
 - name: Base configuration for the gateway
-  # Before the gateway role: the kill-switch has not loaded yet, so apt works.
+  # On a FRESH gateway (rotation play skipped): before the gateway role, the
+  # kill-switch has not loaded yet, so apt works.
   hosts: role_gateway
   become: true
   roles:

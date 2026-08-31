@@ -1,16 +1,21 @@
 ---
+# Definition order is firing order. Reload nftables BEFORE Restart WireGuard so
+# a credential rotation converges new-allow-rule-then-new-tunnel: the new
+# endpoint can never transmit against a ruleset that would judge it, and the
+# old tunnel's retries against the new ruleset are simply dropped (fail-closed)
+# until WireGuard's ~5s re-handshake catches up.
+- name: Reload nftables
+  ansible.builtin.systemd_service:
+    name: nftables
+    state: reloaded
+    enabled: true
+
 - name: Restart WireGuard
   ansible.builtin.systemd_service:
     name: "wg-quick@{{ wg_interface }}"
     state: restarted
     enabled: true
     daemon_reload: true
-
-- name: Reload nftables
-  ansible.builtin.systemd_service:
-    name: nftables
-    state: reloaded
-    enabled: true
 
 - name: Restart nftables
   ansible.builtin.systemd_service:

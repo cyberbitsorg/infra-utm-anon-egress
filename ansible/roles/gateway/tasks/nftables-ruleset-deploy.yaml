@@ -1,0 +1,18 @@
+---
+# Deploy the kill-switch ruleset. Requires the nic-facts.yaml facts.
+#
+# Included by nftables.yaml AND by the playbook's credential-rotation play:
+# the ruleset pins the tunnel endpoint (ip daddr <ip> udp dport <port>), so a
+# rotation that changes entry or exit must swap this file together with
+# wg0.conf, or the old allow-rule silently blocks the new tunnel.
+- name: Deploy the kill-switch ruleset
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0755"
+    # Never install a ruleset nft cannot parse: that leaves either stale rules
+    # or, after a reboot, no rules at all.
+    validate: "/usr/sbin/nft -c -f %s"
+  notify: Reload nftables

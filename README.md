@@ -65,17 +65,33 @@ subscription. `make preflight` checks the tools and generates an SSH key.
 
 ## Quick start
 
-Step 0: the Mullvad subscription, and how you obtain it decides whether any
+*Step 0* is the Mullvad subscription, and how you obtain it decides whether any
 of the rest means anything. Pay with Monero or cash; a bank-linked
 payment ties the account to your identity. The account number is the only
 credential there is, and nothing in this build needs it. Keep it out of your
 terminal, your shell history and anything that keeps a transcript.
 
-```bash
-# Download WireGuard configs from Mullvad's generator into secrets/, named
-# exactly <hostname>.conf (e.g. nl-ams-wg-001.conf). All countries is fine.
-chmod 600 secrets/*.conf       # the bundle unpacks world-readable
+Via a secure computer, a secure line and a secure browser, go to
+https://mullvad.net/en/account/create and choose 'Generate account number.'
+Save the account numer somewhere safe. Pay for your subscription, keeping
+the above in mind.
 
+Then in the left panel, go to WireGuard configuration. Generate a new key,
+and select it. At the bottom select one or multiple exit locations, optional
+content blocking and download the zip file. Put the files in the secret folder
+and chmod them 600 as described below. Take it from there.
+
+When you need to rotate keys or config, just follow the same steps, and run
+a `make up` again. The playbook applies the new credentials to an
+already-built gateway before anything needs the tunnel, so the run does not
+wedge at the apt step. One caveat, by design: if the run *does* hang at apt
+after a rotation, the new credentials themselves are the suspect (expired
+account, revoked key); the gateway never falls back to clear-net to find
+out. Confirm with `sudo wg show wg0 latest-handshakes` on the gateway:
+anything other than `0` means the tunnel is up.
+
+```bash
+chmod 600 secrets/*.conf       # the bundle unpacks world-readable
 cp lab.conf.example lab.conf
 make preflight                 # checks tools; generates the SSH key and .env
 $EDITOR .env                   # set MULLVAD_EXIT, e.g. "nl"

@@ -1,63 +1,8 @@
 ---
-# Derive the interface names ONCE here; the ruleset consumes them. Hardcoding
-# enp0s1/enp0s2 would give a ruleset that looks right and leaks the day the
-# kernel names them differently.
-- name: Find the internal NIC (the one holding the gateway's segment address)
-  # Kept as a LIST, not narrowed with `| first`: if two interfaces carried the
-  # segment address, `first` would pick one at fact-ordering's whim and name
-  # the wrong NIC. The assert below rejects the ambiguity instead.
-  ansible.builtin.set_fact:
-    anon_internal_if_candidates: >-
-      {{ ansible_facts.interfaces
-         | map('regex_replace', '^', '')
-         | select('ne', 'lo')
-         | map('extract', ansible_facts)
-         | selectattr('ipv4', 'defined')
-         | selectattr('ipv4.address', 'equalto', internal_ip)
-         | map(attribute='device') | list }}
-
-- name: Name the internal NIC
-  ansible.builtin.set_fact:
-    anon_internal_if: "{{ anon_internal_if_candidates | first | default('', true) }}"
-
-- name: Read the MAIN routing table's default route
-  # ansible_facts.default_ipv4 comes from `ip route get`, which wg-quick's
-  # policy routing hijacks once the tunnel is up: it returns wg0, not the
-  # physical NIC. The MAIN table's own default route is what policy routing
-  # does not rewrite.
-  ansible.builtin.command: ip -4 route show table main default
-  register: anon_main_default_route
-  changed_when: false
-
-- name: Find the WAN NIC (the physical interface with the MAIN table's default route)
-  # Deliberately NOT regex_search with a capture group: that filter's return
-  # shape (list vs string) has varied across ansible-core versions, and on a
-  # string `| first` would yield 'e' instead of 'enp0s1' -- which the assert
-  # below would happily accept. Matching the whole token returns a string on
-  # every version.
-  ansible.builtin.set_fact:
-    anon_wan_if: >-
-      {{ (anon_main_default_route.stdout | regex_search('dev \S+') | default('', true))
-         | regex_replace('^dev ', '') }}
-
-- name: Fail if either interface could not be identified
-  # A wrong interface name produces a ruleset that passes inspection and
-  # permits egress on the wrong NIC. anon_wan_if == wg_interface is called out
-  # explicitly: wg0 is non-empty and differs from the internal NIC, so a
-  # weaker check passes straight through it.
-  ansible.builtin.assert:
-    that:
-      - anon_internal_if_candidates | length == 1
-      - anon_internal_if | length > 0
-      - anon_wan_if | length > 0
-      - anon_internal_if != anon_wan_if
-      - anon_wan_if != wg_interface
-    fail_msg: >-
-      Could not identify the NICs unambiguously (internal candidates=
-      {{ anon_internal_if_candidates }}, wan='{{ anon_wan_if }}'). Expected
-      EXACTLY ONE interface holding {{ internal_ip }} and a different, physical
-      interface (never '{{ wg_interface }}') holding the MAIN routing table's
-      default route.
+# The NIC discovery lives in nic-facts.yaml: the rotation play reuses it, since
+# it deploys a ruleset too and must never name interfaces differently.
+- name: Identify the NICs
+  ansible.builtin.include_tasks: nic-facts.yaml
 
 - name: Install WireGuard
   # wireguard-tools only: no vendor daemon. Mullvad's app is amd64-only and
@@ -68,25 +13,7 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Read the sanitised WireGuard config
-  ansible.builtin.set_fact:
-    anon_wg_conf_raw: "{{ lookup('file', mullvad_wg_sanitized) }}"
-  no_log: true
-
-- name: Install the WireGuard config with the tunnel MTU pinned
-  # Already sanitised by scripts/up.sh. MTU is pinned here rather than in the
-  # operator's file so regenerating the config on Mullvad's site cannot revert
-  # it.
-  #
-  # Deliberately ONE task, not copy-then-lineinfile: up.sh writes a fresh
-  # MTU-less temp file every run, so a copy plus a separate lineinfile would
-  # restart wg-quick on every single run, forever. Building the final content
-  # here keeps the destination byte-for-byte stable across runs.
-  ansible.builtin.copy:
-    content: "{{ anon_wg_conf_raw | regex_replace('(^\\[Interface\\][^\\n]*\\n)', '\\1MTU = ' ~ wg_mtu ~ '\\n', multiline=true) }}"
-    dest: "/etc/wireguard/{{ wg_interface }}.conf"
-    owner: root
-    group: root
-    mode: "0600"
-  no_log: true
-  notify: Restart WireGuard
+# The config deploy lives in wg-conf-deploy.yaml: the rotation play reuses it
+# so there is exactly one definition of what /etc/wireguard/wg0.conf contains.
+- name: Deploy the WireGuard config
+  ansible.builtin.include_tasks: wg-conf-deploy.yaml

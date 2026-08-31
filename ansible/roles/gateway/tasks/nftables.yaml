@@ -6,17 +6,10 @@
     update_cache: true
     cache_valid_time: 3600
 
+# The ruleset deploy lives in nftables-ruleset-deploy.yaml: the rotation play
+# reuses it so there is exactly one definition of the deployed ruleset.
 - name: Deploy the kill-switch ruleset
-  ansible.builtin.template:
-    src: nftables.conf.j2
-    dest: /etc/nftables.conf
-    owner: root
-    group: root
-    mode: "0755"
-    # Never install a ruleset nft cannot parse: that leaves either stale rules
-    # or, after a reboot, no rules at all.
-    validate: "/usr/sbin/nft -c -f %s"
-  notify: Reload nftables
+  ansible.builtin.include_tasks: nftables-ruleset-deploy.yaml
 
 - name: Ensure the nftables drop-in directory exists
   ansible.builtin.file:

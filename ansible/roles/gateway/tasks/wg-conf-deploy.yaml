@@ -1,0 +1,29 @@
+---
+# Deploy /etc/wireguard/wg0.conf from the sanitized config up.sh passed in.
+#
+# Included by wireguard.yaml AND by the playbook's credential-rotation play:
+# on an already-built gateway this file is what pins the current credentials,
+# so a rotation must rewrite it (and reload the ruleset) BEFORE any task that
+# needs the tunnel -- apt first among them.
+- name: Read the sanitised WireGuard config
+  ansible.builtin.set_fact:
+    anon_wg_conf_raw: "{{ lookup('file', mullvad_wg_sanitized) }}"
+  no_log: true
+
+- name: Install the WireGuard config with the tunnel MTU pinned
+  # Already sanitised by scripts/up.sh. MTU is pinned here rather than in the
+  # operator's file so regenerating the config on Mullvad's site cannot revert
+  # it.
+  #
+  # Deliberately ONE task, not copy-then-lineinfile: up.sh writes a fresh
+  # MTU-less temp file every run, so a copy plus a separate lineinfile would
+  # restart wg-quick on every single run, forever. Building the final content
+  # here keeps the destination byte-for-byte stable across runs.
+  ansible.builtin.copy:
+    content: "{{ anon_wg_conf_raw | regex_replace('(^\\[Interface\\][^\\n]*\\n)', '\\1MTU = ' ~ wg_mtu ~ '\\n', multiline=true) }}"
+    dest: "/etc/wireguard/{{ wg_interface }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart WireGuard
