@@ -20,6 +20,7 @@ LAB_SSH_KEY="${HOME}/.ssh/id_ed25519_anon.pub"
 # except through the gateway (scripts/lib.sh, nic_layout_for_role).
 LAB_SEGMENT="10.20.0.0/24"
 GATEWAY_INTERNAL_IP="10.20.0.1"
+WORKSTATION_INTERNAL_IP="10.20.0.10"
 
 # The vmnet host-only SWITCH has its own subnet, assigned by macOS and separate
 # from LAB_SEGMENT. A live route whose gateway falls inside it (classically a

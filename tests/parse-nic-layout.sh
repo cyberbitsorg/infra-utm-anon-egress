@@ -35,6 +35,10 @@ check "$(internal_ip_for extra 3)"          "10.20.0.13" "extra internal VM fall
 check "$(GATEWAY_INTERNAL_IP=10.20.0.254 internal_ip_for gateway 1)" "10.20.0.254" \
   "gateway IP honours GATEWAY_INTERNAL_IP"
 
+# WORKSTATION_INTERNAL_IP from lab.conf wins for the workstation.
+check "$(WORKSTATION_INTERNAL_IP=10.20.0.99 internal_ip_for workstation 1)" "10.20.0.99" \
+  "workstation IP honours WORKSTATION_INTERNAL_IP"
+
 section "ssh_port_for:"
 # The base must NOT be the sibling lab's 2200: two fleets up at once would fight
 # over the same host socket, and 'make ssh gateway' could land on the lab's Kali.

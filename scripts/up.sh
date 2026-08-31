@@ -162,5 +162,5 @@ run_ansible
 
 echo
 ok "Both VMs are up. Try: make ssh gateway, or make ssh workstation (via the gateway)"
-log "Internal segment: gateway ${GATEWAY_INTERNAL_IP:-10.20.0.1}, workstation 10.20.0.10"
+log "Internal segment: gateway ${GATEWAY_INTERNAL_IP:-10.20.0.1}, workstation ${WORKSTATION_INTERNAL_IP:-10.20.0.10}"
 log "Now run 'make verify' to assert the workstation has no path to the internet."

@@ -132,7 +132,7 @@ internal_ip_for() {
   local role="${1:?role required}" idx="${2:?index required}"
   case "$role" in
     gateway)     echo "${GATEWAY_INTERNAL_IP:-10.20.0.1}" ;;
-    workstation) echo "10.20.0.10" ;;
+    workstation) echo "${WORKSTATION_INTERNAL_IP:-10.20.0.10}" ;;
     *)           echo "10.20.0.$((10 + idx))" ;;
   esac
 }
