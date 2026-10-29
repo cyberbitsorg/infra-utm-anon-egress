@@ -54,7 +54,7 @@ DEBIAN_SHA_ALGO=512
 # extracts. It is ~25 GiB, already larger than LAB_DISK_GB, and never shrunk.
 # The URLs use the per-release directory, not current/, which 404s the moment
 # Kali cuts a release. Releases: https://kali.download/cloud-images/
-KALI_VERSION="2026.2"
+KALI_VERSION="2026.3"
 KALI_IMG_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/kali-linux-${KALI_VERSION}-cloud-genericcloud-arm64.tar.xz"
 KALI_SHA_URL="https://kali.download/cloud-images/kali-${KALI_VERSION}/SHA256SUMS"
 KALI_IMG_FILE="kali-genericcloud-arm64.raw"
