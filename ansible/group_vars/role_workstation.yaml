@@ -1,18 +1,8 @@
 ---
-# The workstation is internal-only: everything below reaches the internet only
-# because the gateway forwards it into the tunnel, so every package here is
-# downloaded over the VPN, never over the real IP.
-common_packages:
-  - ca-certificates
-  - curl
-  - dnsutils
-  - git
-  - htop
-  - jq
-  - net-tools
-  - tmux
-  - tree
-  - vim
+# The workstation is internal-only: it reaches the internet only because the
+# gateway forwards it into the tunnel, so every package installed on it comes
+# over the VPN, never over the real IP. The common package list lives in
+# group_vars/all.yaml, which reaches this host like every other.
 
 # --- Egress-dependent features ----------------------------------------------
 # workstation_has_egress states the fact ("the gateway forwards this host");
